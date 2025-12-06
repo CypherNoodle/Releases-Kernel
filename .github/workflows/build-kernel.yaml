@@ -3,18 +3,16 @@ name: Build Kernel (.deb) and Upload Release
 on:
   push:
     tags:
-      - 'v*'   # Cuando hagas push de un tag como v1.0 v1.0.1 etc.
+      - 'v*'
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-    # 1. Checkout del repositorio Releases-Kernel
     - name: Checkout main repository
       uses: actions/checkout@v4
 
-    # 2. Checkout del repositorio del kernel linux-Sw1-011
     - name: Checkout linux-Sw1-011 source
       uses: actions/checkout@v4
       with:
@@ -22,30 +20,24 @@ jobs:
         token: ${{ secrets.GITHUB_TOKEN }}
         path: kernel-src
 
-    # 3. Instalar dependencias necesarias para compilar kernel y generar .deb
-    - name: Install dependencies
+    - name: Install build dependencies
       run: |
         sudo apt update
-        sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev \
-          fakeroot dpkg-dev libncurses-dev
+        sudo apt install -y \
+          build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
+          libncurses-dev fakeroot dpkg-dev debhelper
 
-    # 4. Compilar el kernel y generar los .deb oficiales Debian
     - name: Build .deb kernel packages
       run: |
         cd kernel-src
-        # Usa defconfig (puedes cambiar a olddefconfig si quieres conservar tu .config)
         make olddefconfig || make defconfig
-        # Compilar el kernel y producir .deb en el directorio padre
         make -j"$(nproc)" bindeb-pkg
 
-    # 5. Mover los .deb generados a una carpeta "build"
     - name: Collect .deb files
       run: |
         mkdir -p build
-        cp ./*.deb build/ 2>/dev/null || true
         cp ../*.deb build/
 
-    # 6. Subir .deb a Releases del repositorio Releases-Kernel
     - name: Upload .deb to release
       uses: softprops/action-gh-release@v1
       with:
