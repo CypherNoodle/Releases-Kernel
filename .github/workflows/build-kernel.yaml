@@ -1,0 +1,50 @@
+name: Build Linux Kernel
+
+on:
+  push:
+    branches:
+      - main # Trigger on pushes to the main branch
+  pull_request:
+    branches:
+      - main # Trigger on pull requests to the main branch
+
+jobs:
+  build_kernel:
+    runs-on: ubuntu-latest # Use the latest Ubuntu runner
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4 # Check out the kernel source code
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y autoconf automake autotools-dev bison build-essential dh-make debhelper debmake devscripts dpkg fakeroot file flex gfortran git gnupg fp-compiler lintian patch pbuilder perl quilt xutils-dev
+
+    - name: Download Linux kernel source (if not already in repo)
+      # If your repository *doesn't* contain the full kernel source, you'll need to download it.
+      # Replace with the desired kernel version.
+      # For example, to download Linux 6.6:
+      # wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.tar.xz
+      # tar -xf linux-6.6.tar.xz
+      # cd linux-6.6
+      run: |
+        # Example: If your repo contains the source in a 'linux' directory
+        # cd linux
+        git clone https://github.com/CypherNoodle/linux-Sw1-011.git
+        cd linux-Sw1-011
+
+    - name: Configure kernel
+      run: |
+        # Copy an existing config or create a new one.
+        # For a standard x64 config:
+         make defconfig
+        # Or if you have a custom .config file in your repo:
+        # cp .config ./.config
+
+    - name: Build kernel
+      run: |
+        make -j$(nproc) # Build the kernel using all available CPU cores
+
+    - name: Archive kernel artifacts
+      uses: actions/upload-artifact@v4
