@@ -38,7 +38,7 @@ jobs:
       run: |
         # Copy an existing config or create a new one.
         # For a standard x64 config:
-         make defconfig
+        # make defconfig
         # Or if you have a custom .config file in your repo:
         # cp .config ./.config
 
