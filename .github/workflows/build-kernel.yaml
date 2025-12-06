@@ -1,50 +1,54 @@
-name: Build Linux Kernel
+name: Build Kernel (.deb) and Upload Release
 
 on:
   push:
-    branches:
-      - main # Trigger on pushes to the main branch
-  pull_request:
-    branches:
-      - main # Trigger on pull requests to the main branch
+    tags:
+      - 'v*'   # Cuando hagas push de un tag como v1.0 v1.0.1 etc.
 
 jobs:
-  build_kernel:
-    runs-on: ubuntu-latest # Use the latest Ubuntu runner
+  build:
+    runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4 # Check out the kernel source code
+    # 1. Checkout del repositorio Releases-Kernel
+    - name: Checkout main repository
+      uses: actions/checkout@v4
 
-    - name: Install build dependencies
+    # 2. Checkout del repositorio del kernel linux-Sw1-011
+    - name: Checkout linux-Sw1-011 source
+      uses: actions/checkout@v4
+      with:
+        repository: CypherNoodle/linux-Sw1-011
+        token: ${{ secrets.GITHUB_TOKEN }}
+        path: kernel-src
+
+    # 3. Instalar dependencias necesarias para compilar kernel y generar .deb
+    - name: Install dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y autoconf automake autotools-dev bison build-essential dh-make debhelper debmake devscripts dpkg fakeroot file flex gfortran git gnupg fp-compiler lintian patch pbuilder perl quilt xutils-dev
+        sudo apt update
+        sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev \
+          fakeroot dpkg-dev libncurses-dev
 
-    - name: Download Linux kernel source (if not already in repo)
-      # If your repository *doesn't* contain the full kernel source, you'll need to download it.
-      # Replace with the desired kernel version.
-      # For example, to download Linux 6.6:
-      # wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.tar.xz
-      # tar -xf linux-6.6.tar.xz
-      # cd linux-6.6
+    # 4. Compilar el kernel y generar los .deb oficiales Debian
+    - name: Build .deb kernel packages
       run: |
-        # Example: If your repo contains the source in a 'linux' directory
-        # cd linux
-        git clone https://github.com/CypherNoodle/linux-Sw1-011.git
-        cd linux-Sw1-011
+        cd kernel-src
+        # Usa defconfig (puedes cambiar a olddefconfig si quieres conservar tu .config)
+        make olddefconfig || make defconfig
+        # Compilar el kernel y producir .deb en el directorio padre
+        make -j"$(nproc)" bindeb-pkg
 
-    - name: Configure kernel
+    # 5. Mover los .deb generados a una carpeta "build"
+    - name: Collect .deb files
       run: |
-        # Copy an existing config or create a new one.
-        # For a standard x64 config:
-        # make defconfig
-        # Or if you have a custom .config file in your repo:
-        # cp .config ./.config
+        mkdir -p build
+        cp ./*.deb build/ 2>/dev/null || true
+        cp ../*.deb build/
 
-    - name: Build kernel
-      run: |
-        make -j$(nproc) # Build the kernel using all available CPU cores
-
-    - name: Archive kernel artifacts
-      uses: actions/upload-artifact@v4
+    # 6. Subir .deb a Releases del repositorio Releases-Kernel
+    - name: Upload .deb to release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: build/*.deb
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
