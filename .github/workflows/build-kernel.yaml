@@ -36,7 +36,7 @@ jobs:
           libncurses-dev fakeroot dpkg-dev debhelper ccache
 
     # ----------------------------
-    # 3. Detect Kernel Version Automatically (VERSION.PATCHLEVEL.SUBLEVEL-EXTRAVERSION)
+    # 3. Detect Kernel Version Automatically
     # ----------------------------
     - name: Detect Kernel Version
       id: detect_version
@@ -52,13 +52,18 @@ jobs:
         echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
 
     # ----------------------------
-    # 4. Smart Cache + ccache (ultra-robusto)
+    # 4. Smart Cache + ccache (Fix aplicado)
     # ----------------------------
+
+    # CREA la carpeta .ccache para evitar warnings de cache
+    - name: Create ccache directory
+      run: mkdir -p kernel-src/.ccache
+
+    # RESTORE de la caché
     - name: Restore Smart Cache
       uses: actions/cache@v4
       with:
         path: kernel-src/.ccache
-        # Hash solo los archivos críticos para compilación
         key: ccache-${{ runner.os }}-kernel-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel-src/Makefile','kernel-src/.config') }}
         restore-keys: |
           ccache-${{ runner.os }}-kernel-${{ env.KERNEL_VERSION }}-
@@ -121,4 +126,4 @@ jobs:
           build/SHA256SUMS.txt
           build/CHANGELOG.txt
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN_
