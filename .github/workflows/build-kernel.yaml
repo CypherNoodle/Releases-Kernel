@@ -10,49 +10,118 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout main repository
-      uses: actions/checkout@v4
 
-    - name: Checkout linux-Sw1-011 source
+    # ----------------------------
+    # 1. Checkout repos
+    # ----------------------------
+    - name: Checkout main repo
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0   # Necesario para generar changelog correcto
+
+    - name: Checkout kernel source
       uses: actions/checkout@v4
       with:
         repository: CypherNoodle/linux-Sw1-011
-        token: ${{ secrets.GITHUB_TOKEN }}
         path: kernel-src
 
+
+    # ----------------------------
+    # 2. Cache build artifacts
+    # ----------------------------
+    - name: Cache ccache
+      uses: actions/cache@v4
+      with:
+        path: kernel-src/.ccache
+        key: ccache-${{ runner.os }}-${{ hashFiles('kernel-src/**/*') }}
+        restore-keys: |
+          ccache-${{ runner.os }}-
+
+
+    # ----------------------------
+    # 3. Install dependencies
+    # ----------------------------
     - name: Install build dependencies
       run: |
         sudo apt update
         sudo apt install -y \
           build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
-          libncurses-dev fakeroot dpkg-dev debhelper
+          libncurses-dev fakeroot dpkg-dev debhelper ccache
 
+
+    - name: Enable ccache
+      run: |
+        export PATH="/usr/lib/ccache:$PATH"
+
+
+    # ----------------------------
+    # 4. Generate Changelog
+    # ----------------------------
+    - name: Generate Changelog
+      id: changelog
+      run: |
+        TAG_NAME="${GITHUB_REF#refs/tags/}"
+        
+        # Detect previous tag
+        PREV_TAG="$(git describe --tags --abbrev=0 "${TAG_NAME}^" 2>/dev/null || true)"
+        
+        echo "New tag: $TAG_NAME"
+        echo "Previous tag: $PREV_TAG"
+
+        if [ -n "$PREV_TAG" ]; then
+          echo "Generating changelog from $PREV_TAG to $TAG_NAME"
+          git log --pretty=format:"%h - %s (%an)" $PREV_TAG..$TAG_NAME > CHANGELOG.txt
+        else
+          echo "No previous tag, generating full changelog"
+          git log --pretty=format:"%h - %s (%an)" > CHANGELOG.txt
+        fi
+
+        cat CHANGELOG.txt
+
+
+    # ----------------------------
+    # 5. Build kernel .deb packages
+    # ----------------------------
     - name: Build .deb kernel packages
       run: |
         cd kernel-src
         make olddefconfig || make defconfig
-        make -j"$(nproc)" bindeb-pkg
 
-    - name: Debug .deb output
-      run: |
-        echo "Listing root:"
-        ls -l .
-        echo "Listing kernel-src:"
-        ls -l kernel-src
-        echo "Listing parent of kernel-src:"
-        ls -l kernel-src/..
+        echo "::group::COMPILATION LOG"
+        make -j"$(nproc)" bindeb-pkg V=0
+        echo "::endgroup::"
 
-    - name: Collect .deb files
+
+    # ----------------------------
+    # 6. Collect artifacts + SHA256
+    # ----------------------------
+    - name: Collect .deb and generate SHA256SUMS
       run: |
         mkdir -p build
-        # Los .deb se generan en el directorio padre de kernel-src
-        cp kernel-src/../*.deb build/ || echo "No .deb files found"
-        ls -l kernel-src/..
-        ls -l build
 
-    - name: Upload .deb to release
+        cp kernel-src/../*.deb build/
+
+        # Generar SHA256SUMS
+        cd build
+        sha256sum *.deb > SHA256SUMS.txt
+        cd ..
+
+        # Mover el changelog también
+        cp CHANGELOG.txt build/
+
+        echo "Contenido de build/:"
+        ls -lh build
+
+
+    # ----------------------------
+    # 7. Upload all assets (deb + sha256 + changelog)
+    # ----------------------------
+    - name: Upload to release
       uses: softprops/action-gh-release@v1
       with:
-        files: build/*.deb
+        files: |
+          build/*.deb
+          build/SHA256SUMS.txt
+          build/CHANGELOG.txt
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
