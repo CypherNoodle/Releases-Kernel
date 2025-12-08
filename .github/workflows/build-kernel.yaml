@@ -17,7 +17,7 @@ jobs:
     - name: Checkout main repo
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0   # Necesario para generar changelog correcto
+        fetch-depth: 0
 
     - name: Checkout kernel source
       uses: actions/checkout@v4
@@ -25,21 +25,8 @@ jobs:
         repository: CypherNoodle/linux-Sw1-011
         path: kernel-src
 
-
     # ----------------------------
-    # 2. Cache build artifacts
-    # ----------------------------
-    - name: Cache ccache
-      uses: actions/cache@v4
-      with:
-        path: kernel-src/.ccache
-        key: ccache-${{ runner.os }}-${{ hashFiles('kernel-src/**/*') }}
-        restore-keys: |
-          ccache-${{ runner.os }}-
-
-
-    # ----------------------------
-    # 3. Install dependencies
+    # 2. Install build dependencies
     # ----------------------------
     - name: Install build dependencies
       run: |
@@ -48,73 +35,83 @@ jobs:
           build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
           libncurses-dev fakeroot dpkg-dev debhelper ccache
 
+    # ----------------------------
+    # 3. Detect Kernel Version Automatically (VERSION.PATCHLEVEL.SUBLEVEL-EXTRAVERSION)
+    # ----------------------------
+    - name: Detect Kernel Version
+      id: detect_version
+      run: |
+        KERNEL_VERSION=$(awk '
+          /^VERSION = / {v=$3}
+          /^PATCHLEVEL = / {p=$3}
+          /^SUBLEVEL = / {s=$3}
+          /^EXTRAVERSION = / {e=$3}
+          END {print v "." p "." s e}
+        ' kernel-src/Makefile)
+        echo "Detected kernel version: $KERNEL_VERSION"
+        echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
+
+    # ----------------------------
+    # 4. Smart Cache + ccache (ultra-robusto)
+    # ----------------------------
+    - name: Restore Smart Cache
+      uses: actions/cache@v4
+      with:
+        path: kernel-src/.ccache
+        # Hash solo los archivos críticos para compilación
+        key: ccache-${{ runner.os }}-kernel-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel-src/Makefile','kernel-src/.config') }}
+        restore-keys: |
+          ccache-${{ runner.os }}-kernel-${{ env.KERNEL_VERSION }}-
+          ccache-${{ runner.os }}-
+          ccache-
 
     - name: Enable ccache
       run: |
         export PATH="/usr/lib/ccache:$PATH"
-
+        ccache -s
 
     # ----------------------------
-    # 4. Generate Changelog
+    # 5. Generate Changelog
     # ----------------------------
     - name: Generate Changelog
       id: changelog
       run: |
         TAG_NAME="${GITHUB_REF#refs/tags/}"
-        
-        # Detect previous tag
         PREV_TAG="$(git describe --tags --abbrev=0 "${TAG_NAME}^" 2>/dev/null || true)"
-        
-        echo "New tag: $TAG_NAME"
-        echo "Previous tag: $PREV_TAG"
-
         if [ -n "$PREV_TAG" ]; then
-          echo "Generating changelog from $PREV_TAG to $TAG_NAME"
           git log --pretty=format:"%h - %s (%an)" $PREV_TAG..$TAG_NAME > CHANGELOG.txt
         else
-          echo "No previous tag, generating full changelog"
           git log --pretty=format:"%h - %s (%an)" > CHANGELOG.txt
         fi
-
         cat CHANGELOG.txt
 
-
     # ----------------------------
-    # 5. Build kernel .deb packages
+    # 6. Build kernel .deb packages
     # ----------------------------
     - name: Build .deb kernel packages
       run: |
         cd kernel-src
         make olddefconfig || make defconfig
-
         echo "::group::COMPILATION LOG"
         make -j"$(nproc)" bindeb-pkg V=0
         echo "::endgroup::"
 
-
     # ----------------------------
-    # 6. Collect artifacts + SHA256
+    # 7. Collect artifacts + SHA256
     # ----------------------------
     - name: Collect .deb and generate SHA256SUMS
       run: |
         mkdir -p build
-
         cp kernel-src/../*.deb build/
-
-        # Generar SHA256SUMS
         cd build
         sha256sum *.deb > SHA256SUMS.txt
         cd ..
-
-        # Mover el changelog también
         cp CHANGELOG.txt build/
-
         echo "Contenido de build/:"
         ls -lh build
 
-
     # ----------------------------
-    # 7. Upload all assets (deb + sha256 + changelog)
+    # 8. Upload to release
     # ----------------------------
     - name: Upload to release
       uses: softprops/action-gh-release@v1
