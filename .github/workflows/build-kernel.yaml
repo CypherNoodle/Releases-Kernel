@@ -11,9 +11,9 @@ jobs:
 
     steps:
 
-    # ----------------------------
-    # 1. Checkout repos
-    # ----------------------------
+    # ------------------------------------------------------------
+    # 1. Checkouts
+    # ------------------------------------------------------------
     - name: Checkout main repo
       uses: actions/checkout@v4
       with:
@@ -25,9 +25,9 @@ jobs:
         repository: CypherNoodle/linux-Sw1-011
         path: kernel-src
 
-    # ----------------------------
-    # 2. Install build dependencies
-    # ----------------------------
+    # ------------------------------------------------------------
+    # 2. Install required packages
+    # ------------------------------------------------------------
     - name: Install build dependencies
       run: |
         sudo apt update
@@ -35,38 +35,38 @@ jobs:
           build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
           libncurses-dev fakeroot dpkg-dev debhelper ccache
 
-    # ----------------------------
-    # 3. Detect Kernel Version Automatically
-    # ----------------------------
+    # ------------------------------------------------------------
+    # 3. Auto-detect kernel version from Makefile
+    # ------------------------------------------------------------
     - name: Detect Kernel Version
       id: detect_version
       run: |
         KERNEL_VERSION=$(awk '
-          /^VERSION = / {v=$3}
-          /^PATCHLEVEL = / {p=$3}
-          /^SUBLEVEL = / {s=$3}
+          /^VERSION = /      {v=$3}
+          /^PATCHLEVEL = /   {p=$3}
+          /^SUBLEVEL = /     {s=$3}
           /^EXTRAVERSION = / {e=$3}
           END {print v "." p "." s e}
         ' kernel-src/Makefile)
+
         echo "Detected kernel version: $KERNEL_VERSION"
         echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
 
-    # ----------------------------
-    # 4. Smart Cache + ccache (Fix aplicado)
-    # ----------------------------
+    # ------------------------------------------------------------
+    # 4. Smart Cache + ccache
+    # ------------------------------------------------------------
 
-    # CREA la carpeta .ccache para evitar warnings de cache
+    # Needed so the cache path exists before restoring
     - name: Create ccache directory
       run: mkdir -p kernel-src/.ccache
 
-    # RESTORE de la caché
-    - name: Restore Smart Cache
+    - name: Restore Smart CCache
       uses: actions/cache@v4
       with:
         path: kernel-src/.ccache
-        key: ccache-${{ runner.os }}-kernel-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel-src/Makefile','kernel-src/.config') }}
+        key: ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel-src/Makefile', 'kernel-src/.config') }}
         restore-keys: |
-          ccache-${{ runner.os }}-kernel-${{ env.KERNEL_VERSION }}-
+          ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
           ccache-${{ runner.os }}-
           ccache-
 
@@ -75,35 +75,55 @@ jobs:
         export PATH="/usr/lib/ccache:$PATH"
         ccache -s
 
-    # ----------------------------
-    # 5. Generate Changelog
-    # ----------------------------
+    # ------------------------------------------------------------
+    # 4.1 Kernel Modules Cache (NEW)
+    # ------------------------------------------------------------
+    - name: Restore Kernel Modules Cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          kernel-src/.tmp_versions
+          kernel-src/Module.symvers
+          kernel-src/modules.order
+          kernel-src/**/*.o
+        key: modules-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel-src/Makefile','kernel-src/.config') }}
+        restore-keys: |
+          modules-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
+          modules-${{ runner.os }}-
+          modules-
+
+    # ------------------------------------------------------------
+    # 5. Auto Changelog
+    # ------------------------------------------------------------
     - name: Generate Changelog
       id: changelog
       run: |
         TAG_NAME="${GITHUB_REF#refs/tags/}"
         PREV_TAG="$(git describe --tags --abbrev=0 "${TAG_NAME}^" 2>/dev/null || true)"
+
         if [ -n "$PREV_TAG" ]; then
           git log --pretty=format:"%h - %s (%an)" $PREV_TAG..$TAG_NAME > CHANGELOG.txt
         else
           git log --pretty=format:"%h - %s (%an)" > CHANGELOG.txt
         fi
+
         cat CHANGELOG.txt
 
-    # ----------------------------
+    # ------------------------------------------------------------
     # 6. Build kernel .deb packages
-    # ----------------------------
+    # ------------------------------------------------------------
     - name: Build .deb kernel packages
       run: |
         cd kernel-src
         make olddefconfig || make defconfig
-        echo "::group::COMPILATION LOG"
+
+        echo "::group::Kernel Build Logs"
         make -j"$(nproc)" bindeb-pkg V=0
         echo "::endgroup::"
 
-    # ----------------------------
-    # 7. Collect artifacts + SHA256
-    # ----------------------------
+    # ------------------------------------------------------------
+    # 7. Collect artifacts + SHA256SUMS
+    # ------------------------------------------------------------
     - name: Collect .deb and generate SHA256SUMS
       run: |
         mkdir -p build
@@ -112,12 +132,11 @@ jobs:
         sha256sum *.deb > SHA256SUMS.txt
         cd ..
         cp CHANGELOG.txt build/
-        echo "Contenido de build/:"
         ls -lh build
 
-    # ----------------------------
-    # 8. Upload to release
-    # ----------------------------
+    # ------------------------------------------------------------
+    # 8. Upload to Release
+    # ------------------------------------------------------------
     - name: Upload to release
       uses: softprops/action-gh-release@v1
       with:
@@ -126,4 +145,4 @@ jobs:
           build/SHA256SUMS.txt
           build/CHANGELOG.txt
       env:
-        GITHUB_TOKEN_
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
