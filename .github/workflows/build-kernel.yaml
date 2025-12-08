@@ -33,10 +33,22 @@ jobs:
         make olddefconfig || make defconfig
         make -j"$(nproc)" bindeb-pkg
 
+    - name: Debug .deb output
+      run: |
+        echo "Listing root:"
+        ls -l .
+        echo "Listing kernel-src:"
+        ls -l kernel-src
+        echo "Listing parent of kernel-src:"
+        ls -l kernel-src/..
+
     - name: Collect .deb files
       run: |
         mkdir -p build
-        cp ../*.deb build/
+        # Los .deb se generan en el directorio padre de kernel-src
+        cp kernel-src/../*.deb build/ || echo "No .deb files found"
+        ls -l kernel-src/..
+        ls -l build
 
     - name: Upload .deb to release
       uses: softprops/action-gh-release@v1
