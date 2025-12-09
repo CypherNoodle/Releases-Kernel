@@ -65,11 +65,10 @@ jobs:
               sudo mkswap $SWAPFILE
               sudo swapon $SWAPFILE
               echo "swapfile=$SWAPFILE" >> $GITHUB_OUTPUT
-              # Cleanup automático del swap al terminar el job
-              trap "sudo swapoff $SWAPFILE || true; sudo rm -f $SWAPFILE || true" EXIT
           else
               echo "swapfile=none" >> $GITHUB_OUTPUT
-
+          fi
+          
       # Calcular paralelismo seguro basado en RAM disponible para make, QEMU, BOLT y XZ
       - name: Calculate safe parallelism & threads
         id: calc-parallel
