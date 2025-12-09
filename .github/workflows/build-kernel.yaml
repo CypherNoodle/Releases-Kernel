@@ -46,8 +46,9 @@ jobs:
           sudo ./llvm.sh 19                          # Instalar LLVM/Clang 19
           sudo apt update
           sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
-            libncurses-dev libncurses5-dev fakeroot dpkg-dev debhelper dwarves zstd git \
-            qemu-system-x86 qemu-kvm ccache sccache perf linux-tools-common zlib1g-dev xz-utils
+          libncurses-dev libncurses5-dev fakeroot dpkg-dev debhelper dwarves zstd git \
+          qemu-system-x86 qemu-kvm ccache sccache linux-tools-common linux-tools-generic \
+          linux-tools-$(uname -r) zlib1g-dev xz-utils
           mkdir -p $CCACHE_DIR $SCCACHE_DIR profdata profdata2
 
       # Configurar swap dinámico si la RAM disponible < 4GB
