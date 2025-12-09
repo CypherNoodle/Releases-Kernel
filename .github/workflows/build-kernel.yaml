@@ -36,6 +36,13 @@ jobs:
           libncurses-dev fakeroot dpkg-dev debhelper ccache
 
     # ------------------------------------------------------------
+    # 2.1 Ensure ccache is in PATH globally
+    # ------------------------------------------------------------
+    - name: Setup ccache in PATH
+      shell: bash
+      run: echo "/usr/lib/ccache" >> $GITHUB_PATH   
+
+    # ------------------------------------------------------------
     # 3. Auto-detect kernel version from Makefile
     # ------------------------------------------------------------
     - name: Detect Kernel Version
@@ -55,8 +62,6 @@ jobs:
     # ------------------------------------------------------------
     # 4. Smart Cache + ccache
     # ------------------------------------------------------------
-
-    # Needed so the cache path exists before restoring
     - name: Create ccache directory
       run: mkdir -p kernel-src/.ccache
 
@@ -70,43 +75,38 @@ jobs:
           ccache-${{ runner.os }}-
           ccache-
 
-    - name: Enable ccache
-      run: |
-        export PATH="/usr/lib/ccache:$PATH"
-        ccache -s
+    - name: Show ccache stats
+      run: ccache -s
 
     # ------------------------------------------------------------
-    # 4.1 Kernel Modules Cache (NEW)
+    # 4.1 Optimized Kernel Build Cache
     # ------------------------------------------------------------
-    - name: Restore Kernel Modules Cache
+    - name: Restore Kernel Build Cache
       uses: actions/cache@v4
       with:
         path: |
           kernel-src/.tmp_versions
           kernel-src/Module.symvers
           kernel-src/modules.order
-          kernel-src/**/*.o
-        key: modules-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel-src/Makefile','kernel-src/.config') }}
+          kernel-src/include/generated
+          kernel-src/arch/x86/include/generated
+          kernel-src/scripts/basic
+          kernel-src/scripts/mod
+          kernel-src/scripts/kconfig
+        key: kernelcache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel-src/Makefile','kernel-src/.config') }}
         restore-keys: |
-          modules-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
-          modules-${{ runner.os }}-
-          modules-
+          kernelcache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
+          kernelcache-${{ runner.os }}-
+          kernelcache-
 
     # ------------------------------------------------------------
-    # 5. Auto Changelog
+    # 5. Generate CHANGELOG
     # ------------------------------------------------------------
-    - name: Generate Changelog
-      id: changelog
+    - name: Generate CHANGELOG
       run: |
-        TAG_NAME="${GITHUB_REF#refs/tags/}"
-        PREV_TAG="$(git describe --tags --abbrev=0 "${TAG_NAME}^" 2>/dev/null || true)"
-
-        if [ -n "$PREV_TAG" ]; then
-          git log --pretty=format:"%h - %s (%an)" $PREV_TAG..$TAG_NAME > CHANGELOG.txt
-        else
-          git log --pretty=format:"%h - %s (%an)" > CHANGELOG.txt
-        fi
-
+        cd kernel-src
+        git log --reverse -n 3 --pretty=format:"%h - %s (%an)" > ../CHANGELOG.txt
+        cd ..
         cat CHANGELOG.txt
 
     # ------------------------------------------------------------
@@ -135,7 +135,7 @@ jobs:
         ls -lh build
 
     # ------------------------------------------------------------
-    # 8. Upload to Release
+    # 8. Upload all artifacts to Release
     # ------------------------------------------------------------
     - name: Upload to release
       uses: softprops/action-gh-release@v1
