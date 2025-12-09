@@ -131,7 +131,7 @@ jobs:
 
       # Subir vmlinux generado como artefacto
       - name: Upload vmlinux baseline
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: vmlinux
           path: kernel-src/vmlinux
@@ -148,7 +148,7 @@ jobs:
     steps:
       # Descargar vmlinux base
       - name: Download baseline vmlinux
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: vmlinux
           path: kernel-src/
@@ -190,7 +190,7 @@ jobs:
 
       # Subir perfiles recolectados como artefacto
       - name: Upload profdata
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: profdata
           path: kernel-src/profdata
@@ -210,11 +210,11 @@ jobs:
     steps:
       # Descargar artefactos base y profdata
       - name: Download baseline artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: vmlinux
           path: kernel-src/
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v4
         with:
           name: profdata
           path: kernel-src/profdata
@@ -297,7 +297,7 @@ jobs:
       MAX_QEMU: ${{ needs.setup.outputs.max_qemu }}
     steps:
       - name: Download previous vmlinux
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: vmlinux
           path: kernel-src/
@@ -333,7 +333,7 @@ jobs:
             llvm-profdata-19 merge -o profdata2/kernel.profdata profdata2/*.profraw
           fi
       - name: Upload profdata2
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: profdata2
           path: kernel-src/profdata2
@@ -349,11 +349,11 @@ jobs:
       XZ_THREADS: ${{ needs.setup.outputs.xz_threads }}
     steps:
       - name: Download baseline artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: vmlinux
           path: kernel-src/
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v4
         with:
           name: profdata2
           path: kernel-src/profdata2
