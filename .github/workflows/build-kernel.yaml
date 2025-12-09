@@ -1,148 +1,204 @@
-name: Build Kernel (.deb) and Upload Release
+name: Build Ultra-Fast Kernel (Final Ultra-Parallel)
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      enable_thinlto:
+        description: 'Habilitar ThinLTO (puede romper builds)'
+        required: false
+        default: 'false'
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      KERNEL_VERSION: "Sw1-011"
+      KC_ARCH: "x86-64-v2"
 
     steps:
-
-    # ------------------------------------------------------------
-    # 1. Checkouts
-    # ------------------------------------------------------------
-    - name: Checkout main repo
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-
+    # 1) CHECKOUT
     - name: Checkout kernel source
       uses: actions/checkout@v4
       with:
         repository: CypherNoodle/linux-Sw1-011
         path: kernel-src
+        fetch-depth: 0
 
-    # ------------------------------------------------------------
-    # 2. Install required packages
-    # ------------------------------------------------------------
-    - name: Install build dependencies
-      run: |
-        sudo apt update
-        sudo apt install -y \
-          build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
-          libncurses-dev fakeroot dpkg-dev debhelper ccache
-
-    # ------------------------------------------------------------
-    # 2.1 Ensure ccache is in PATH globally
-    # ------------------------------------------------------------
-    - name: Setup ccache in PATH
-      shell: bash
-      run: echo "/usr/lib/ccache" >> $GITHUB_PATH   
-
-    # ------------------------------------------------------------
-    # 3. Auto-detect kernel version from Makefile
-    # ------------------------------------------------------------
-    - name: Detect Kernel Version
-      id: detect_version
-      run: |
-        KERNEL_VERSION=$(awk '
-          /^VERSION = /      {v=$3}
-          /^PATCHLEVEL = /   {p=$3}
-          /^SUBLEVEL = /     {s=$3}
-          /^EXTRAVERSION = / {e=$3}
-          END {print v "." p "." s e}
-        ' kernel-src/Makefile)
-
-        echo "Detected kernel version: $KERNEL_VERSION"
-        echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
-
-    # ------------------------------------------------------------
-    # 4. Smart Cache + ccache
-    # ------------------------------------------------------------
-    - name: Create ccache directory
-      run: mkdir -p kernel-src/.ccache
-
-    - name: Restore Smart CCache
-      uses: actions/cache@v4
-      with:
-        path: kernel-src/.ccache
-        key: ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel-src/Makefile', 'kernel-src/.config') }}
-        restore-keys: |
-          ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
-          ccache-${{ runner.os }}-
-          ccache-
-
-    - name: Show ccache stats
-      run: ccache -s
-
-    # ------------------------------------------------------------
-    # 4.1 Optimized Kernel Build Cache
-    # ------------------------------------------------------------
-    - name: Restore Kernel Build Cache
+    # 2) CACHE EXTENDIDO
+    - name: Restore Build & Compiler Cache
       uses: actions/cache@v4
       with:
         path: |
-          kernel-src/.tmp_versions
           kernel-src/Module.symvers
           kernel-src/modules.order
-          kernel-src/include/generated
-          kernel-src/arch/x86/include/generated
-          kernel-src/scripts/basic
-          kernel-src/scripts/mod
-          kernel-src/scripts/kconfig
-        key: kernelcache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel-src/Makefile','kernel-src/.config') }}
+          kernel-src/.tmp_versions
+          kernel-src/**/*.o
+          kernel-src/scripts
+          kernel-src/.ccache
+          kernel-src/.sccache
+        key: kernelbuild-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel-src/Makefile','kernel-src/.config') }}
         restore-keys: |
-          kernelcache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
-          kernelcache-${{ runner.os }}-
-          kernelcache-
+          kernelbuild-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
 
-    # ------------------------------------------------------------
-    # 5. Generate CHANGELOG
-    # ------------------------------------------------------------
-    - name: Generate CHANGELOG
+    # 3) DEPENDENCIAS
+    - name: Install build dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y clang-{18,19} lld-{18,19} llvm-{18,19} \
+          build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
+          libncurses-dev fakeroot dpkg-dev debhelper ccache sccache \
+          dwarves pahole zstd git
+
+        if command -v clang-19 >/dev/null 2>&1; then
+          echo "CLANG_BIN=clang-19" >> $GITHUB_ENV
+          echo "CLANG_PLUS_BIN=clang++-19" >> $GITHUB_ENV
+        else
+          echo "CLANG_BIN=clang-18" >> $GITHUB_ENV
+          echo "CLANG_PLUS_BIN=clang++-18" >> $GITHUB_ENV
+        fi
+
+    # 4) SCCACHE / CCACHE
+    - name: Setup CCache / SCCache
+      run: |
+        echo "/usr/lib/ccache" >> $GITHUB_PATH
+        mkdir -p kernel-src/.ccache kernel-src/.sccache
+        echo "CCACHE_DIR=$PWD/kernel-src/.ccache" >> $GITHUB_ENV
+        echo "SCCACHE_DIR=$PWD/kernel-src/.sccache" >> $GITHUB_ENV
+        echo "RUSTC_WRAPPER=$(which sccache)" >> $GITHUB_ENV
+        ccache -M 5G || true
+        sccache --stop-server || true
+        sccache --start-server
+        sccache --zero-stats || true
+        sccache --max-size 10G || true
+
+    # 5) CONFIG
+    - name: Prepare Kernel Config
       run: |
         cd kernel-src
-        git log --reverse -n 3 --pretty=format:"%h - %s (%an)" > ../CHANGELOG.txt
-        cd ..
-        cat CHANGELOG.txt
+        if [ -f .config ]; then cp .config .config.bak; else make defconfig; fi
 
-    # ------------------------------------------------------------
-    # 6. Build kernel .deb packages
-    # ------------------------------------------------------------
-    - name: Build .deb kernel packages
+    - name: Enable ThinLTO (optional)
+      if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.enable_thinlto == 'true' }}
       run: |
         cd kernel-src
-        make olddefconfig || make defconfig
+        sed -i '/CONFIG_LTO_NONE/d' .config || true
+        echo 'CONFIG_LTO_CLANG=y' >> .config
+        echo 'CONFIG_LTO_CLANG_THIN=y' >> .config
+        echo 'CONFIG_THINLTO=y' >> .config
+        make olddefconfig
 
-        echo "::group::Kernel Build Logs"
-        make -j"$(nproc)" bindeb-pkg V=0
-        echo "::endgroup::"
-
-    # ------------------------------------------------------------
-    # 7. Collect artifacts + SHA256SUMS
-    # ------------------------------------------------------------
-    - name: Collect .deb and generate SHA256SUMS
+    # 6) DETECT FEATURES
+    - name: Detect LTO / ThinLTO
+      id: detect_features
       run: |
-        mkdir -p build
-        cp kernel-src/../*.deb build/
-        cd build
+        cd kernel-src
+        LTO=0; THIN=0
+        grep -q '^CONFIG_LTO_CLANG=y' .config && LTO=1
+        grep -q '^CONFIG_LTO_CLANG_THIN=y' .config && THIN=1
+        echo "LTO_SUPPORTED=$LTO" >> $GITHUB_OUTPUT
+        echo "THINLTO_SUPPORTED=$THIN" >> $GITHUB_OUTPUT
+
+    # 7) BUILD ULTRA-PARALLEL
+    - name: Build Kernel & Parallel Tasks
+      run: |
+        cd kernel-src
+        make olddefconfig
+
+        export KCFLAGS="-O3 -march=${{ env.KC_ARCH }} -mtune=generic"
+        export KCPPFLAGS="$KCFLAGS"
+        export LLVM=1
+        export LLVM_IAS=1
+
+        if [ "${{ steps.detect_features.outputs.THINLTO_SUPPORTED }}" = "1" ]; then
+          export CFLAGS_KERNEL="-flto=thin"
+          export LDFLAGS_vmlinux="-fuse-ld=lld"
+        elif [ "${{ steps.detect_features.outputs.LTO_SUPPORTED }}" = "1" ]; then
+          export CFLAGS_KERNEL="-flto"
+          export LDFLAGS_vmlinux="-fuse-ld=lld"
+        fi
+
+        export CC="sccache ${{ env.CLANG_BIN }}"
+        export HOSTCC="ccache ${{ env.CLANG_BIN }}"
+        export HOSTCXX="ccache ${{ env.CLANG_PLUS_BIN }}"
+        export LD=lld
+
+        # 🔹 Kernel incremental
+        make -j"$(nproc)" vmlinux modules scripts > ../build/kernel.log 2>&1 &
+
+        # 🔹 Tarball incremental con rsync
+        (
+          mkdir -p ../build/full-kernel
+          rsync -a --link-dest=../build/full-kernel arch/x86/boot ../build/full-kernel/
+          rsync -a --link-dest=../build/full-kernel vmlinux ../build/full-kernel/
+          rsync -a --link-dest=../build/full-kernel System.map ../build/full-kernel/
+          rsync -a --link-dest=../build/full-kernel .config ../build/full-kernel/config
+          MODDIR=$(find . -maxdepth 3 -type d -path "./lib/modules/*" | head -n1 || true)
+          [ -n "$MODDIR" ] && rsync -a --link-dest=../build/full-kernel/modules "$MODDIR" ../build/full-kernel/modules
+          cd ../build
+          tar -czf kernel-build.tar.gz full-kernel > tarball.log 2>&1
+        ) &
+
+        # 🔹 CHANGELOG
+        (
+          PREV=$(git describe --tags --abbrev=0 --match "v*" HEAD^ 2>/dev/null || true)
+          if [ -n "$PREV" ]; then
+            git log --pretty=format:"%h - %s (%an)" "$PREV"..HEAD > ../build/CHANGELOG.txt
+          else
+            git log --reverse -n 30 --pretty=format:"%h - %s (%an)" > ../build/CHANGELOG.txt
+          fi
+        ) &
+
+        wait
+
+        # 🔹 Generación .deb
+        make -j1 bindeb-pkg LOCALVERSION="-${{ env.KERNEL_VERSION }}" V=0 > deb.log 2>&1
+
+        # Stats caches
+        sccache --show-stats || true
+        ccache -s || true
+
+    # 8) ARTIFACTS
+    - name: Collect Artifacts
+      run: |
+        mkdir -p build/debs
+        cp kernel-src/../*.deb build/debs/
+        cd build/debs
         sha256sum *.deb > SHA256SUMS.txt
-        cd ..
-        cp CHANGELOG.txt build/
-        ls -lh build
 
-    # ------------------------------------------------------------
-    # 8. Upload all artifacts to Release
-    # ------------------------------------------------------------
+    # 9) RELEASE
     - name: Upload to release
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          build/*.deb
-          build/SHA256SUMS.txt
+          build/debs/*.deb
+          build/kernel-build.tar.gz
+          build/debs/SHA256SUMS.txt
           build/CHANGELOG.txt
+        body_path: build/CHANGELOG.txt
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    # 10) SAVE CACHES
+    - name: Save Build Cache
+      if: always()
+      uses: actions/cache@v4
+      with:
+        path: |
+          kernel-src/Module.symvers
+          kernel-src/modules.order
+          kernel-src/.tmp_versions
+          kernel-src/**/*.o
+          kernel-src/scripts
+        key: kernelbuild-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel-src/Makefile','kernel-src/.config') }}
+
+    - name: Save Compiler Caches
+      if: always()
+      uses: actions/cache@v4
+      with:
+        path: |
+          kernel-src/.ccache
+          kernel-src/.sccache
+        key: compilercache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel-src/Makefile','kernel-src/.config') }}
