@@ -16,9 +16,9 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      # -----------------------------------------------
-      # Checkout del Repositorio del Kernel
-      # -----------------------------------------------
+      # ----------------------------------------------------
+      # CHECKOUT REAL DEL KERNEL (INCLUYENDO .config)
+      # ----------------------------------------------------
       - name: Checkout kernel repo
         uses: actions/checkout@v4
         with:
@@ -26,81 +26,83 @@ jobs:
           path: ${{ env.KSRC }}
           fetch-depth: 0
 
-      # -----------------------------------------------
-      # Calcular núcleos CPU
-      # -----------------------------------------------
+      # DEBUG: Confirmar que el .config existe y está bien
+      - name: Mostrar .config real (debug)
+        run: |
+          echo "===== .config REAL DEL REPO ====="
+          ls -l ${{ env.KSRC }}/.config
+          head -n 20 ${{ env.KSRC }}/.config || true
+
+      # ----------------------------------------------------
+      # NPROC
+      # ----------------------------------------------------
       - name: Calcular recursos (nproc)
         id: calc
         run: |
           echo "p=$(nproc)" >> $GITHUB_OUTPUT
 
-      # -----------------------------------------------
-      # Cache SCCACHE
-      # -----------------------------------------------
+      # ----------------------------------------------------
+      # CACHE SCCACHE (IMPORTANTE: YA NO USA hashFiles!!!)
+      # ----------------------------------------------------
       - name: Restaurar Cache de SCCACHE
         uses: actions/cache@v4
         with:
           path: ${{ env.SCCACHE_DIR }}
-          key: sccache-${{ runner.os }}-clang-${{ env.LLVM_VERSION }}-${{ hashFiles(format('{0}/.config', env.KSRC)) }}
-          restore-keys: sccache-${{ runner.os }}-clang-${{ env.LLVM_VERSION }}-
+          key: sccache-${{ runner.os }}-clang-${{ env.LLVM_VERSION }}
 
-      # -----------------------------------------------
-      # Dependencias
-      # -----------------------------------------------
+      # ----------------------------------------------------
+      # DEPENDENCIAS
+      # ----------------------------------------------------
       - name: Instalar dependencias
         run: |
-          # 1. Instalar LLVM/Clang
+          # LLVM/Clang
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh ${{ env.LLVM_VERSION }}
 
-          # 2. Paquetes necesarios
           sudo apt update
           sudo apt install -y \
             build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
-            libncurses-dev debhelper dwarves zstd sccache xz-utils \
-            util-linux fakeroot dpkg-dev cpio lld-${{ env.LLVM_VERSION }}
-               
-          # Enlace simbólico requerido por el Kernel
+            libncurses-dev debhelper dwarves zstd sccache xz-utils util-linux \
+            fakeroot dpkg-dev cpio lld-${{ env.LLVM_VERSION }} \
+            llvm-${{ env.LLVM_VERSION }} llvm-${{ env.LLVM_VERSION }}-tools
+
           sudo ln -sf /usr/bin/ld.lld-${{ env.LLVM_VERSION }} /usr/bin/ld.lld
 
-          # Configuración SCCACHE
           echo "SCCACHE_DIR=${{ env.SCCACHE_DIR }}" >> $GITHUB_ENV
           echo "SCCACHE_LOG=info" >> $GITHUB_ENV
           echo "${{ github.workspace }}/.sccache" >> $GITHUB_PATH
 
-      # -----------------------------------------------
-      # Configuración Kernel (ThinLTO + ZSTD)
-      # -----------------------------------------------
+      # ----------------------------------------------------
+      # CONFIG DEL KERNEL → USAR TU .config SIN DESTRUIRLO
+      # ----------------------------------------------------
       - name: Configuración Kernel
         working-directory: ${{ env.KSRC }}
         run: |
-          [ ! -f .config ] && make defconfig
+          # Asegurar que usa TU .config del repo
+          yes "" | make oldconfig
 
-          # Activar Clang LTO Thin
-          sed -i '/CONFIG_LTO/d;/CONFIG_THINLTO/d' .config
-          echo "CONFIG_LTO_CLANG=y" >> .config
-          echo "CONFIG_THINLTO=y" >> .config
+          # LTO Thin
+          scripts/config --enable LTO_CLANG
+          scripts/config --enable THINLTO
+          scripts/config --disable LTO_NONE
 
-          # ZSTD kernel + módulos + initrd
-          sed -i \
-            -e 's/CONFIG_KERNEL_GZIP=y/# CONFIG_KERNEL_GZIP is not set/' \
-            -e 's/# CONFIG_KERNEL_ZSTD is not set/CONFIG_KERNEL_ZSTD=y/' \
-            -e 's/CONFIG_MODULE_COMPRESS_GZIP=y/# CONFIG_MODULE_COMPRESS_GZIP is not set/' \
-            -e 's/# CONFIG_MODULE_COMPRESS_ZSTD is not set/CONFIG_MODULE_COMPRESS_ZSTD=y/' \
-            .config
-          echo "CONFIG_RD_ZSTD=y" >> .config
+          # ZSTD en kernel, módulos e initrd
+          scripts/config --enable KERNEL_ZSTD
+          scripts/config --enable MODULE_COMPRESS_ZSTD
+          scripts/config --enable RD_ZSTD
 
-          # Quitar debug pesado
+          # Desactivar debug pesado
           for opt in DEBUG_KERNEL KASAN KCOV PROFILING FRAME_POINTER COMPILE_TEST; do
-            sed -i "s/CONFIG_${opt}=y/# CONFIG_${opt} is not set/" .config
+            scripts/config --disable $opt
           done
 
-          make olddefconfig
+          # Aplicar nuevos defaults
+          yes "" | make olddefconfig
 
-      # -----------------------------------------------
-      # Compilación Kernel
-      # -----------------------------------------------
+      # ----------------------------------------------------
+      # COMPILACIÓN
+      # ----------------------------------------------------
       - name: Build Kernel
         working-directory: ${{ env.KSRC }}
         env:
@@ -114,9 +116,9 @@ jobs:
         run: |
           make -j${{ steps.calc.outputs.p }} bindeb-pkg LOCALVERSION="-${{ github.run_number }}-opt"
 
-      # -----------------------------------------------
-      # SHA256 + Changelog
-      # -----------------------------------------------
+      # ----------------------------------------------------
+      # SHA256 + CHANGELOG
+      # ----------------------------------------------------
       - name: SHA256 + CHANGELOG
         working-directory: ${{ env.KSRC }}
         run: |
@@ -134,9 +136,9 @@ jobs:
             git log --reverse --max-count=30 --pretty=format:"%h - %s" > CHANGELOG.txt
           fi
 
-      # -----------------------------------------------
-      # Publicar release
-      # -----------------------------------------------
+      # ----------------------------------------------------
+      # RELEASE
+      # ----------------------------------------------------
       - name: Publicar Release
         uses: softprops/action-gh-release@v1
         with:
