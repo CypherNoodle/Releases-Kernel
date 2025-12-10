@@ -1,34 +1,28 @@
 name: Kernel Debian-Compatible (PGO + BOLT + AutoFDO Incremental, Ultra-Fast, OOM-safe)
 
-# ------------------------------
-# Activadores del workflow
-# ------------------------------
 on:
-  push:
+   push:
     tags:
-      - 'v*'           # Ejecuta el workflow al hacer push de tags que comiencen con "v"
-  workflow_dispatch:    # Permite ejecución manual desde GitHub Actions
+      - 'v*'
+   workflow_dispatch:
 
-# ------------------------------
-# Variables de entorno globales
-# ------------------------------
 env:
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   SCCACHE_DIR: ${{ github.workspace }}/.sccache
 
 jobs:
-  # ------------------------------
-  # 0) Configuración inicial del runner
-  # ------------------------------
+
+# ------------------------------
+# 0) Configuración inicial del runner
+# ------------------------------
   setup:
     runs-on: ubuntu-latest
     outputs:
       parallel: ${{ steps.calc-parallel.outputs.parallel }}
-      max_qemu: ${{ steps.calc-parallel.outputs.max_qemu }}
-      bolt_threads: ${{ steps.calc-parallel.outputs.bolt_threads }}
-      xz_threads: ${{ steps.calc-parallel.outputs.xz_threads }}
+      maxqemu: ${{ steps.calc-parallel.outputs.maxqemu }}
+      boltthreads: ${{ steps.calc-parallel.outputs.boltthreads }}
+      xzthreads: ${{ steps.calc-parallel.outputs.xzthreads }}
     steps:
-      # Clonar el repositorio del kernel
       - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
@@ -37,30 +31,26 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # Instalar dependencias necesarias (LLVM/Clang, build tools, QEMU, perf, utilidades)
       - name: Install dependencies
         run: |
           set -euo pipefail
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh 19                          # Instalar LLVM/Clang 19
+          sudo ./llvm.sh 19
           sudo apt update
           sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
           libncurses-dev libncurses5-dev fakeroot dpkg-dev debhelper dwarves zstd git \
           qemu-system-x86 qemu-kvm ccache sccache linux-tools-common linux-tools-generic \
-          linux-tools-$(uname -r) zlib1g-dev xz-utils
+          linux-tools-$(uname -r) zlib1g-dev xz-utils rsync
           mkdir -p $CCACHE_DIR $SCCACHE_DIR profdata profdata2
 
-      # Configurar swap dinámico si la RAM disponible < 4GB
       - name: Setup dynamic swap
         id: swap
         run: |
           MEM_AVAIL=$(free -m | awk '/^Mem:/ {print $7}')
           SWAPFILE=/swapfile
           if [ "$MEM_AVAIL" -lt 4000 ]; then
-              echo "Menos de 4GB de RAM detectada, creando swap de 4GB..."
-              SWAP_SIZE=4096
-              sudo fallocate -l ${SWAP_SIZE}M $SWAPFILE
+              sudo fallocate -l 4096M $SWAPFILE
               sudo chmod 600 $SWAPFILE
               sudo mkswap $SWAPFILE
               sudo swapon $SWAPFILE
@@ -69,7 +59,6 @@ jobs:
               echo "swapfile=none" >> $GITHUB_OUTPUT
           fi
 
-      # Calcular paralelismo seguro basado en RAM disponible para make, QEMU, BOLT y XZ
       - name: Calculate safe parallelism & threads
         id: calc-parallel
         run: |
@@ -78,17 +67,17 @@ jobs:
           PARALLEL=$(( PARALLEL < 1 ? 1 : PARALLEL ))
           MAX_QEMU=$(( MEM / 1024 ))
           MAX_QEMU=$(( MAX_QEMU < 1 ? 1 : MAX_QEMU ))
-          MAX_QEMU=$(( MAX_QEMU > 4 ? 4 : MAX_QEMU )) # Limitar a 4 QEMU
+          MAX_QEMU=$(( MAX_QEMU > 4 ? 4 : MAX_QEMU ))
           BOLT_THREADS=$(( PARALLEL / 2 ))
           BOLT_THREADS=$(( BOLT_THREADS < 1 ? 1 : BOLT_THREADS ))
           XZ_THREADS=$(( PARALLEL / 2 ))
           XZ_THREADS=$(( XZ_THREADS < 1 ? 1 : XZ_THREADS ))
+          
           echo "parallel=$PARALLEL" >> $GITHUB_OUTPUT
-          echo "max_qemu=$MAX_QEMU" >> $GITHUB_OUTPUT
-          echo "bolt_threads=$BOLT_THREADS" >> $GITHUB_OUTPUT
-          echo "xz_threads=$XZ_THREADS" >> $GITHUB_OUTPUT
+          echo "maxqemu=$MAX_QEMU" >> $GITHUB_OUTPUT
+          echo "boltthreads=$BOLT_THREADS" >> $GITHUB_OUTPUT
+          echo "xzthreads=$XZ_THREADS" >> $GITHUB_OUTPUT
 
-      # Restaurar cache de compilador (ccache y sccache)
       - name: Restore compiler caches
         uses: actions/cache@v4
         with:
@@ -97,28 +86,43 @@ jobs:
             ${{ github.workspace }}/.sccache
           key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
 
-  # ------------------------------
-  # 1) Build incremental base
-  # ------------------------------
+# ------------------------------
+# 1) Build incremental base
+# ------------------------------
   build-incremental:
     needs: setup
     runs-on: ubuntu-latest
     env:
       PARALLEL: ${{ needs.setup.outputs.parallel }}
     steps:
-      # Configuración inicial del kernel si no existe .config
+      - name: Checkout kernel source (Build)
+        uses: actions/checkout@v4
+        with:
+          repository: CypherNoodle/linux-Sw1-011
+          path: kernel-src
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Restore compiler caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/.ccache
+            ${{ github.workspace }}/.sccache
+          key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
+          restore-keys: compilercache-${{ runner.os }}-clang19-v19-
+
       - name: Kernel configuration
         working-directory: kernel-src
         run: |
           set -euo pipefail
           if [ ! -f .config ]; then
             make defconfig
-            echo "CONFIG_LTO_CLANG=y" >> .config
+            echo "CONFIGLTOCLANG=y" >> .config
             echo "CONFIG_THINLTO=y" >> .config
             make olddefconfig
           fi
 
-      # Compilación incremental del kernel y módulos
       - name: Incremental compile baseline kernel
         working-directory: kernel-src
         run: |
@@ -127,30 +131,61 @@ jobs:
           export HOSTCC="ccache clang-19"
           export HOSTCXX="ccache clang++-19"
           export LD=lld
-          make -j$PARALLEL vmlinux modules | tee baseline_incremental.log
+          # Compilamos bzImage también para ahorrar tiempo en el Job 2
+          make -j$PARALLEL vmlinux bzImage modules | tee baseline_incremental.log
 
-      # Subir vmlinux generado como artefacto
       - name: Upload vmlinux baseline
         uses: actions/upload-artifact@v4
         with:
-          name: vmlinux
-          path: kernel-src/vmlinux
+          name: vmlinux-build1
+          path: |
+            kernel-src/vmlinux
+            kernel-src/arch/x86/boot/bzImage
 
-  # ------------------------------
-  # 2) Primer round de PGO + AutoFDO
-  # ------------------------------
+      - name: Upload kernel config
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-config
+          path: kernel-src/.config
+
+# ------------------------------
+# 2) Primer round de PGO + AutoFDO
+# ------------------------------
   pgo-auto:
     needs: build-incremental
     runs-on: ubuntu-latest
     env:
       PARALLEL: ${{ needs.setup.outputs.parallel }}
-      MAX_QEMU: ${{ needs.setup.outputs.max_qemu }}
+      MAXQEMU: ${{ needs.setup.outputs.maxqemu }}
     steps:
+      - name: Checkout kernel source (PGO 1)
+        uses: actions/checkout@v4
+        with:
+          repository: CypherNoodle/linux-Sw1-011
+          path: kernel-src
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download kernel configuration
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-config
+          path: kernel-src/
+
+      # Descargamos vmlinux y bzImage del paso anterior
       - name: Download baseline vmlinux
         uses: actions/download-artifact@v4
         with:
-          name: vmlinux
+          name: vmlinux-build1
           path: kernel-src/
+
+      # Movemos bzImage a su lugar correcto (artifact download no preserva estructura completa a veces)
+      - name: Restore bzImage location
+        working-directory: kernel-src
+        run: |
+            mkdir -p arch/x86/boot
+            # Si el artifact bajó en la raiz o carpeta equivocada, aseguramos su lugar
+            find . -name bzImage -exec cp {} arch/x86/boot/bzImage \;
 
       - name: Restore compiler caches
         uses: actions/cache@v4
@@ -159,17 +194,18 @@ jobs:
             ${{ github.workspace }}/.ccache
             ${{ github.workspace }}/.sccache
           key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
+          restore-keys: compilercache-${{ runner.os }}-clang19-v19-
 
-      # Recolectar perfiles usando QEMU y perf (round 1)
       - name: Collect PGO profiles (round 1)
         working-directory: kernel-src
         run: |
           mkdir -p profdata
-          for i in $(seq 1 $MAX_QEMU); do
+          for i in $(seq 1 $MAXQEMU); do
             (
               echo "QEMU instance $i (round 1)"
               dd if=/dev/zero of=disk$i.img bs=1M count=256
               mkfs.ext4 disk$i.img
+              # Usamos el bzImage descargado/restaurado
               sudo perf record -o profdata/perf$i.data -e cycles:u \
                 qemu-system-x86_64 -kernel arch/x86/boot/bzImage \
                 -append "console=ttyS0" -drive file=disk$i.img,format=raw \
@@ -192,9 +228,9 @@ jobs:
           name: profdata
           path: kernel-src/profdata
 
-  # ------------------------------
-  # 3) Build final con PGO round 1 + BOLT + AutoFDO
-  # ------------------------------
+# ------------------------------
+# 3) Build final con PGO round 1 + BOLT + AutoFDO
+# ------------------------------
   build-final-auto:
     needs:
       - build-incremental
@@ -202,14 +238,28 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PARALLEL: ${{ needs.setup.outputs.parallel }}
-      BOLT_THREADS: ${{ needs.setup.outputs.bolt_threads }}
-      XZ_THREADS: ${{ needs.setup.outputs.xz_threads }}
+      BOLTTHREADS: ${{ needs.setup.outputs.boltthreads }}
     steps:
+      - name: Checkout kernel source (Build Final 1)
+        uses: actions/checkout@v4
+        with:
+          repository: CypherNoodle/linux-Sw1-011
+          path: kernel-src
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download kernel configuration
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-config
+          path: kernel-src/
+
       - name: Download baseline artifacts
         uses: actions/download-artifact@v4
         with:
-          name: vmlinux
+          name: vmlinux-build1
           path: kernel-src/
+
       - uses: actions/download-artifact@v4
         with:
           name: profdata
@@ -222,8 +272,8 @@ jobs:
             ${{ github.workspace }}/.ccache
             ${{ github.workspace }}/.sccache
           key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
+          restore-keys: compilercache-${{ runner.os }}-clang19-v19-
 
-      # Compilación final con PGO round 1 + BOLT + AutoFDO
       - name: Final incremental build with PGO round 1 + BOLT + AutoFDO
         working-directory: kernel-src
         run: |
@@ -232,7 +282,10 @@ jobs:
             export CFLAGS_KERNEL="-flto=thin -fprofile-use=$PROFILE"
             export LDFLAGS_vmlinux="-flto -fuse-ld=lld -fprofile-use=$PROFILE"
           fi
-          make -j$PARALLEL vmlinux modules | tee final_auto.log
+          make olddefconfig
+          # Compilamos bzImage de nuevo con las optimizaciones PGO
+          make -j$PARALLEL vmlinux bzImage modules | tee final_auto.log
+          
           cat profdata/perf*.out 2>/dev/null > profdata/perf_all.out || true
           if [ -s profdata/perf_all.out ]; then
               llvm-bolt-19 vmlinux -o vmlinux.bolt \
@@ -241,28 +294,63 @@ jobs:
                 -split-functions \
                 -icf=1 \
                 -dyno-trace=profdata/perf_all.out \
-                -threads=$BOLT_THREADS | tee bolt.log
+                -threads=$BOLTTHREADS | tee bolt.log
               if [ -f vmlinux.bolt ] && [ -s vmlinux.bolt ]; then
                 mv vmlinux.bolt vmlinux
+                # NOTA: BOLT invalida bzImage porque cambia vmlinux.
+                # Para la ronda 2 de PGO, lo ideal es usar vmlinux.bolt.
+                # Sin embargo, bzImage no se actualiza mágicamente con BOLT.
+                # Para mantener esto simple, usaremos el bzImage PGO (sin bolt) para el arranque de QEMU
+                # pero el vmlinux (con bolt) para la recolección de perf.
               fi
           fi
-          xz -T$XZ_THREADS -9 vmlinux
 
-  # ------------------------------
-  # 4) Segundo round de PGO + AutoFDO
-  # ------------------------------
+      # AÑADIDO: Subir los artefactos intermedios para la ronda 2
+      - name: Upload vmlinux round 1
+        uses: actions/upload-artifact@v4
+        with:
+          name: vmlinux-build2
+          path: |
+            kernel-src/vmlinux
+            kernel-src/arch/x86/boot/bzImage
+
+# ------------------------------
+# 4) Segundo round de PGO + AutoFDO
+# ------------------------------
   pgo-auto-2:
     needs: build-final-auto
     runs-on: ubuntu-latest
     env:
       PARALLEL: ${{ needs.setup.outputs.parallel }}
-      MAX_QEMU: ${{ needs.setup.outputs.max_qemu }}
+      MAXQEMU: ${{ needs.setup.outputs.maxqemu }}
     steps:
+      - name: Checkout kernel source (PGO 2)
+        uses: actions/checkout@v4
+        with:
+          repository: CypherNoodle/linux-Sw1-011
+          path: kernel-src
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download kernel configuration
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-config
+          path: kernel-src/
+
+      # Descargar artefactos del Job 3 (Build Final 1)
       - name: Download previous vmlinux
         uses: actions/download-artifact@v4
         with:
-          name: vmlinux
+          name: vmlinux-build2
           path: kernel-src/
+      
+      - name: Restore bzImage location
+        working-directory: kernel-src
+        run: |
+            mkdir -p arch/x86/boot
+            find . -name bzImage -exec cp {} arch/x86/boot/bzImage \;
+
       - name: Restore compiler caches
         uses: actions/cache@v4
         with:
@@ -270,11 +358,13 @@ jobs:
             ${{ github.workspace }}/.ccache
             ${{ github.workspace }}/.sccache
           key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
+          restore-keys: compilercache-${{ runner.os }}-clang19-v19-
+
       - name: Collect PGO profiles (round 2)
         working-directory: kernel-src
         run: |
           mkdir -p profdata2
-          for i in $(seq 1 $MAX_QEMU); do
+          for i in $(seq 1 $MAXQEMU); do
             (
               echo "QEMU instance $i (round 2)"
               dd if=/dev/zero of=disk2_$i.img bs=1M count=256
@@ -300,9 +390,9 @@ jobs:
           name: profdata2
           path: kernel-src/profdata2
 
-  # ------------------------------
-  # 5) Build final incremental definitivo y release
-  # ------------------------------
+# ------------------------------
+# 5) Build final incremental definitivo y release
+# ------------------------------
   build-final-auto-2:
     needs:
       - build-final-auto
@@ -310,18 +400,33 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PARALLEL: ${{ needs.setup.outputs.parallel }}
-      BOLT_THREADS: ${{ needs.setup.outputs.bolt_threads }}
-      XZ_THREADS: ${{ needs.setup.outputs.xz_threads }}
+      BOLTTHREADS: ${{ needs.setup.outputs.boltthreads }}
+      XZTHREADS: ${{ needs.setup.outputs.xzthreads }}
     steps:
+      - name: Checkout kernel source (Final Release)
+        uses: actions/checkout@v4
+        with:
+          repository: CypherNoodle/linux-Sw1-011
+          path: kernel-src
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download kernel configuration
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-config
+          path: kernel-src/
+
       - name: Download baseline artifacts
         uses: actions/download-artifact@v4
         with:
-          name: vmlinux
+          name: vmlinux-build1
           path: kernel-src/
       - uses: actions/download-artifact@v4
         with:
           name: profdata2
           path: kernel-src/profdata2
+
       - name: Restore compiler caches
         uses: actions/cache@v4
         with:
@@ -329,8 +434,8 @@ jobs:
             ${{ github.workspace }}/.ccache
             ${{ github.workspace }}/.sccache
           key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
+          restore-keys: compilercache-${{ runner.os }}-clang19-v19-
 
-      # Compilación final con PGO round 2 + BOLT + AutoFDO
       - name: Final incremental build with PGO round 2 + BOLT + AutoFDO
         working-directory: kernel-src
         run: |
@@ -339,7 +444,11 @@ jobs:
             export CFLAGS_KERNEL="-flto=thin -fprofile-use=$PROFILE"
             export LDFLAGS_vmlinux="-flto -fuse-ld=lld -fprofile-use=$PROFILE"
           fi
-          make -j$PARALLEL vmlinux modules | tee final_auto_round2.log
+          make olddefconfig
+          # Compilamos vmlinux y modulos antes de empaquetar
+          make -j$PARALLEL vmlinux modules | tee finalautoround2.log
+          
+          # Aplicar BOLT
           cat profdata2/perf*.out 2>/dev/null > profdata2/perf_all.out || true
           if [ -s profdata2/perf_all.out ]; then
               llvm-bolt-19 vmlinux -o vmlinux.bolt \
@@ -348,26 +457,28 @@ jobs:
                 -split-functions \
                 -icf=1 \
                 -dyno-trace=profdata2/perf_all.out \
-                -threads=$BOLT_THREADS | tee bolt_round2.log
+                -threads=$BOLTTHREADS | tee boltround2.log
               if [ -f vmlinux.bolt ] && [ -s vmlinux.bolt ]; then
                 mv vmlinux.bolt vmlinux
               fi
           fi
-          xz -T$XZ_THREADS -9 vmlinux
+          # IMPORTANTE: NO comprimimos vmlinux aquí (sin xz) porque bindeb-pkg lo necesita descomprimido.
 
-      # Construir paquetes .deb y SHA256
       - name: Build .deb packages + SHA256
         working-directory: kernel-src
         run: |
-          export DEB_BUILD_OPTIONS="parallel=$PARALLEL"
+          export DEBBUILDOPTIONS="parallel=$PARALLEL"
           rm -rf ../debs2
           mkdir -p ../debs2
-          make -j$PARALLEL bindeb-pkg LOCALVERSION="-${{ github.run_number }}-final" | tee deb_round2.log
+          
+          # Generamos los paquetes. bindeb-pkg usará el vmlinux existente (que ya tiene BOLT)
+          # a menos que detecte cambios masivos.
+          make -j$PARALLEL bindeb-pkg LOCALVERSION="-${{ github.run_number }}-final" | tee debround2.log
+          
           cp ../*.deb ../debs2/
           cd ../debs2
           sha256sum *.deb > SHA256SUMS.txt
 
-      # Generar CHANGELOG final único
       - name: Generate CHANGELOG
         working-directory: kernel-src
         run: |
@@ -376,8 +487,8 @@ jobs:
             git log --pretty=format:"%h - %s (%an)" "$PREV"..HEAD > ../CHANGELOG.txt
           else
             git log --reverse --max-count=30 --pretty=format:"%h - %s (%an)" > ../CHANGELOG.txt
+          fi
 
-      # Subir artefactos finales al release
       - name: Upload final release artifacts
         uses: softprops/action-gh-release@v1
         with:
@@ -387,3 +498,4 @@ jobs:
             ../CHANGELOG.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
