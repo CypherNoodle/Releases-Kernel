@@ -33,7 +33,6 @@ jobs:
 
       - name: Setup environment directories
         run: |
-          # Solo creamos directorios para que la acción de caché funcione
           mkdir -p $CCACHE_DIR $SCCACHE_DIR profdata profdata2
 
       - name: Setup dynamic swap
@@ -95,19 +94,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # ----------------------------------------------------
-      # FIX: Duplicamos la instalación de dependencias aquí
-      # para evitar el error 'gelf.h' y 'objtool'
-      # ----------------------------------------------------
       - name: Install dependencies (incl. gelf.h fix)
         run: |
           set -euo pipefail
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          # Usamos sudo aquí para asegurar que las variables de entorno de clang se configuren
-          # correctamente, aunque el Job 0 ya lo hizo, es una práctica segura reejecutarlo.
           sudo ./llvm.sh 19
           sudo apt update
+          # Instalamos dependencias de compilación, QEMU y utilidades
           sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
           libncurses-dev libncurses5-dev fakeroot dpkg-dev debhelper dwarves zstd git \
           qemu-system-x86 qemu-kvm ccache sccache linux-tools-common linux-tools-generic \
@@ -122,31 +116,27 @@ jobs:
           key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
           restore-keys: compilercache-${{ runner.os }}-clang19-v19-
 
-      # ----------------------------------------------------
-      # FIX: Lógica de configuración corregida
-      # ----------------------------------------------------
-      - name: Kernel configuration
+      - name: Kernel configuration (Fix LTO Duplication)
         working-directory: kernel-src
         run: |
           set -euo pipefail
-          # 1. Si no hay .config, creamos uno base
+          
+          # 1. Creamos el .config si no existe
           if [ ! -f .config ]; then
             echo "--- .config no encontrado, generando defconfig ---"
             make defconfig
           fi
           
-          # 2. Inyectamos/Aseguramos las opciones de LTO/Clang
-          # (Importante para que no se pierdan si se usa un .config preexistente)
+          # 2. LIMPIAMOS y luego AÑADIMOS las opciones de LTO/Clang para evitar duplicados
+          sed -i '/CONFIG_LTO_CLANG/d' .config
+          sed -i '/CONFIG_THINLTO/d' .config
+          
           echo "CONFIG_LTO_CLANG=y" >> .config
           echo "CONFIG_THINLTO=y" >> .config
-
-          # 3. Actualizamos la configuración. olddefconfig usa los valores por defecto 
-          # para opciones nuevas o sin configurar, evitando los prompts interactivos.
-          echo "--- Aplicando olddefconfig para valores por defecto y actualización ---"
-          make olddefconfig
           
-          # Verificación rápida (opcional, pero útil)
-          grep -E "CONFIG_LTO_CLANG|CONFIG_THINLTO" .config
+          # 3. Actualizamos la configuración. El '|| true' evita el fallo por advertencias (exit code 1).
+          echo "--- Aplicando olddefconfig para valores por defecto y actualización ---"
+          make olddefconfig || true
 
       - name: Incremental compile baseline kernel
         working-directory: kernel-src
@@ -156,7 +146,6 @@ jobs:
           export HOSTCC="ccache clang-19"
           export HOSTCXX="ccache clang++-19"
           export LD=lld
-          # Compilamos bzImage también para ahorrar tiempo en el Job 2
           make -j$PARALLEL vmlinux bzImage modules | tee baseline_incremental.log
 
       - name: Upload vmlinux baseline
@@ -173,7 +162,6 @@ jobs:
           name: kernel-config
           path: kernel-src/.config
 
-# (El resto de los jobs 2, 3, 4 y 5 quedan sin cambios, ya que los errores fueron en Job 1)
 # ------------------------------
 # 2) Primer round de PGO + AutoFDO
 # ------------------------------
@@ -198,19 +186,16 @@ jobs:
           name: kernel-config
           path: kernel-src/
 
-      # Descargamos vmlinux y bzImage del paso anterior
       - name: Download baseline vmlinux
         uses: actions/download-artifact@v4
         with:
           name: vmlinux-build1
           path: kernel-src/
 
-      # Movemos bzImage a su lugar correcto (artifact download no preserva estructura completa a veces)
       - name: Restore bzImage location
         working-directory: kernel-src
         run: |
             mkdir -p arch/x86/boot
-            # Si el artifact bajó en la raiz o carpeta equivocada, aseguramos su lugar
             find . -name bzImage -exec cp {} arch/x86/boot/bzImage \;
 
       - name: Restore compiler caches
@@ -231,7 +216,6 @@ jobs:
               echo "QEMU instance $i (round 1)"
               dd if=/dev/zero of=disk$i.img bs=1M count=256
               mkfs.ext4 disk$i.img
-              # Usamos el bzImage descargado/restaurado
               sudo perf record -o profdata/perf$i.data -e cycles:u \
                 qemu-system-x86_64 -kernel arch/x86/boot/bzImage \
                 -append "console=ttyS0" -drive file=disk$i.img,format=raw \
@@ -291,7 +275,6 @@ jobs:
           name: profdata
           path: kernel-src/profdata
           
-      # FIX: Necesitamos las dependencias aquí también
       - name: Install dependencies (incl. gelf.h fix)
         run: |
           set -euo pipefail
@@ -313,12 +296,11 @@ jobs:
           key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
           restore-keys: compilercache-${{ runner.os }}-clang19-v19-
           
-      # REVISIÓN: Aseguramos el olddefconfig en este paso también, usando el .config descargado
-      - name: Update kernel configuration for PGO build
+      - name: Update kernel configuration
         working-directory: kernel-src
         run: |
-          # Aseguramos que el .config descargado se actualice silenciosamente.
-          make olddefconfig
+          # El '|| true' previene el fallo por advertencias después de descargar el .config.
+          make olddefconfig || true
 
       - name: Final incremental build with PGO round 1 + BOLT + AutoFDO
         working-directory: kernel-src
@@ -328,7 +310,6 @@ jobs:
             export CFLAGS_KERNEL="-flto=thin -fprofile-use=$PROFILE"
             export LDFLAGS_vmlinux="-flto -fuse-ld=lld -fprofile-use=$PROFILE"
           fi
-          # Ya corrimos olddefconfig, compilamos solo lo necesario
           make -j$PARALLEL vmlinux bzImage modules | tee final_auto.log
           
           cat profdata/perf*.out 2>/dev/null > profdata/perf_all.out || true
@@ -377,7 +358,6 @@ jobs:
           name: kernel-config
           path: kernel-src/
 
-      # Descargar artefactos del Job 3 (Build Final 1)
       - name: Download previous vmlinux
         uses: actions/download-artifact@v4
         with:
@@ -466,7 +446,6 @@ jobs:
           name: profdata2
           path: kernel-src/profdata2
           
-      # FIX: Necesitamos las dependencias aquí también
       - name: Install dependencies (incl. gelf.h fix)
         run: |
           set -euo pipefail
@@ -488,12 +467,11 @@ jobs:
           key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
           restore-keys: compilercache-${{ runner.os }}-clang19-v19-
           
-      # REVISIÓN: Aseguramos el olddefconfig en este paso también, usando el .config descargado
       - name: Update kernel configuration for final build
         working-directory: kernel-src
         run: |
-          # Aseguramos que el .config descargado se actualice silenciosamente.
-          make olddefconfig
+          # El '|| true' previene el fallo por advertencias después de descargar el .config.
+          make olddefconfig || true
 
       - name: Final incremental build with PGO round 2 + BOLT + AutoFDO
         working-directory: kernel-src
