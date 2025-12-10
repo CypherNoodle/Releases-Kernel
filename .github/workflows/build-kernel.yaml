@@ -1,576 +1,179 @@
-name: Kernel Acer SW1-011 Debian (PGO x2 + BOLT + AutoFDO Incremental, Ultra-Fast, OOM-safe)
+name: Kernel Debian Ultra-Compact PGO+BOLT
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
   workflow_dispatch:
 
 env:
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   SCCACHE_DIR: ${{ github.workspace }}/.sccache
+  KSRC: kernel-src
+  LLVM_VERSION: 19
+  QEMU_PROFILE_TIME: 120
 
 jobs:
-
-# ------------------------------
-# 0) Configuración inicial (Setup)
-# ------------------------------
-  setup:
+  setup-build:
     runs-on: ubuntu-latest
     outputs:
-      parallel: ${{ steps.calc-parallel.outputs.parallel }}
-      maxqemu: ${{ steps.calc-parallel.outputs.maxqemu }}
-      boltthreads: ${{ steps.calc-parallel.outputs.boltthreads }}
-      xzthreads: ${{ steps.calc-parallel.outputs.xzthreads }}
+      parallel: ${{ steps.calc.outputs.p }}
+      maxqemu: ${{ steps.calc.outputs.q }}
+      boltthreads: ${{ steps.calc.outputs.b }}
+      xzthreads: ${{ steps.calc.outputs.x }}
     steps:
-      - name: Checkout kernel source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           repository: CypherNoodle/linux-Sw1-011
-          path: kernel-src
+          path: ${{ env.KSRC }}
           fetch-depth: 0
-          persist-credentials: false
 
-      - name: Setup environment directories
-        run: mkdir -p $CCACHE_DIR $SCCACHE_DIR profdata profdata2
-
-      - name: Setup dynamic swap
-        id: swap
+      - name: Setup Cache & Calcular Recursos
+        id: calc
         run: |
-          MEM_AVAIL=$(free -m | awk '/^Mem:/ {print $7}')
-          SWAPFILE=/swapfile
-          if [ "$MEM_AVAIL" -lt 4000 ]; then
-              sudo fallocate -l 4096M $SWAPFILE
-              sudo chmod 600 $SWAPFILE
-              sudo mkswap $SWAPFILE
-              sudo swapon $SWAPFILE
-              echo "swapfile=$SWAPFILE" >> $GITHUB_OUTPUT
-          else
-              echo "swapfile=none" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Calculate safe parallelism & threads
-        id: calc-parallel
-        run: |
+          mkdir -p $CCACHE_DIR $SCCACHE_DIR prof afdo prof2 afdo2
           MEM=$(free -m | awk '/^Mem:/ {print $2}')
-          PARALLEL=$(( MEM / 1500 ))
-          PARALLEL=$(( PARALLEL < 1 ? 1 : PARALLEL ))
-          
-          MAX_QEMU=$(( MEM / 1024 ))
-          MAX_QEMU=$(( MAX_QEMU < 1 ? 1 : MAX_QEMU ))
-          MAX_QEMU=$(( MAX_QEMU > 4 ? 4 : MAX_QEMU ))
-          
-          BOLT_THREADS=$(( PARALLEL / 2 ))
-          BOLT_THREADS=$(( BOLT_THREADS < 1 ? 1 : BOLT_THREADS ))
-          XZ_THREADS=$(( PARALLEL / 2 ))
-          XZ_THREADS=$(( XZ_THREADS < 1 ? 1 : XZ_THREADS ))
-          
-          echo "parallel=$PARALLEL" >> $GITHUB_OUTPUT
-          echo "maxqemu=$MAX_QEMU" >> $GITHUB_OUTPUT
-          echo "boltthreads=$BOLT_THREADS" >> $GITHUB_OUTPUT
-          echo "xzthreads=$XZ_THREADS" >> $GITHUB_OUTPUT
+          P=$((MEM/2000)); [ $P -lt 1 ] && P=1
+          Q=$((MEM/1500)); [ $Q -lt 1 ] && Q=1; [ $Q -gt 4 ] && Q=4
+          B=$((P/2)); [ $B -lt 1 ] && B=1
+          X=$((P/2)); [ $X -lt 1 ] && X=1
+          echo "p=$P" >> $GITHUB_OUTPUT
+          echo "q=$Q" >> $GITHUB_OUTPUT
+          echo "b=$B" >> $GITHUB_OUTPUT
+          echo "x=$X" >> $GITHUB_OUTPUT
 
-      - name: Restore compiler caches
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: |
-            ${{ github.workspace }}/.ccache
-            ${{ github.workspace }}/.sccache
-          key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
+            ${{ env.CCACHE_DIR }}
+            ${{ env.SCCACHE_DIR }}
+          key: cc-${{ runner.os }}-clang-${{ env.LLVM_VERSION }}-${{ hashFiles('${{ env.KSRC }}/.config') }}
 
-# ------------------------------
-# 1) Build incremental base
-# FIX: Persistencia de .config (kconfig) y rendimiento (-s)
-# ------------------------------
-  build-incremental:
-    needs: setup
-    runs-on: ubuntu-latest
-    env:
-      PARALLEL: ${{ needs.setup.outputs.parallel }}
-    steps:
-      - name: Checkout kernel source (Build)
-        uses: actions/checkout@v4
-        with:
-          repository: CypherNoodle/linux-Sw1-011
-          path: kernel-src
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Install dependencies (incl. gelf.h fix)
+      - name: Instalar Dependencias
         run: |
-          set -euo pipefail
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 19
+          wget https://apt.llvm.org/llvm.sh; chmod +x llvm.sh; sudo ./llvm.sh $LLVM_VERSION
           sudo apt update
-          sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
-          libncurses-dev libncurses5-dev fakeroot dpkg-dev debhelper dwarves zstd git \
-          qemu-system-x86 qemu-kvm ccache sccache linux-tools-common linux-tools-generic \
-          linux-tools-$(uname -r) zlib1g-dev xz-utils rsync
+          sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev libdw-dev linux-tools-common linux-tools-generic \
+                             libncurses-dev debhelper dwarves zstd ccache sccache xz-utils qemu-system-x86 fakeroot dpkg-dev cpio util-linux
 
-      - name: Restore compiler caches
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ github.workspace }}/.ccache
-            ${{ github.workspace }}/.sccache
-          key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
-          restore-keys: compilercache-${{ runner.os }}-clang19-v19-
-
-      - name: Kernel configuration (Fix LTO Duplication)
-        working-directory: kernel-src
+      - name: Configuración Kernel LTO
+        working-directory: ${{ env.KSRC }}
         run: |
-          set -euo pipefail
-          
-          if [ ! -f .config ]; then
-            echo "--- .config no encontrado, generando defconfig ---"
-            make defconfig
-          fi
-          
-          sed -i '/CONFIG_LTO_CLANG/d' .config
-          sed -i '/CONFIG_THINLTO/d' .config
-          
-          echo "CONFIG_LTO_CLANG=y" >> .config
-          echo "CONFIG_THINLTO=y" >> .config
-          
-          echo "--- Aplicando olddefconfig ---"
+          [ ! -f .config ] && make defconfig
+          sed -i '/CONFIG_LTO_CLANG/d;/CONFIG_THINLTO/d' .config
+          echo -e "CONFIG_LTO_CLANG=y\nCONFIG_THINLTO=y\nCONFIG_KEXEC=y" >> .config
           make olddefconfig
 
-      - name: Incremental compile baseline kernel
-        working-directory: kernel-src
+      - name: Build Base
+        working-directory: ${{ env.KSRC }}
         run: |
-          set -euo pipefail
-          export CC="sccache clang-19"
-          export HOSTCC="ccache clang-19"
-          export HOSTCXX="ccache clang++-19"
+          export CC="sccache clang-${LLVM_VERSION}"
+          export HOSTCC="ccache clang-${LLVM_VERSION}"
+          export HOSTCXX="ccache clang++-${LLVM_VERSION}"
           export LD=lld
-          # OPTIMIZACIÓN: Añadido -s (silent)
-          make -j$PARALLEL -s vmlinux bzImage modules | tee baseline_incremental.log
-          
-          # FIX CRÍTICO (Persistencia): Copiamos .config (oculto) a kconfig (visible)
+          make -j${{ steps.calc.outputs.p }} -s vmlinux bzImage modules
           cp .config kconfig
 
-      - name: Upload vmlinux baseline
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: vmlinux-build1
+          name: base
           path: |
-            kernel-src/vmlinux
-            kernel-src/arch/x86/boot/bzImage
+            ${{ env.KSRC }}/vmlinux
+            ${{ env.KSRC }}/arch/x86/boot/bzImage
+            ${{ env.KSRC }}/kconfig
 
-      - name: Upload kernel config
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernel-config
-          path: kernel-src/kconfig
-
-# ------------------------------
-# 2) Primer round de PGO + AutoFDO
-# FIX: Permisos (chown) y Restauración de .config
-# ------------------------------
-  pgo-auto:
-    needs: build-incremental
+  pgo-bolt-final:
+    needs: setup-build
     runs-on: ubuntu-latest
     env:
-      PARALLEL: ${{ needs.setup.outputs.parallel }}
-      MAXQEMU: ${{ needs.setup.outputs.maxqemu }}
+      PAR: ${{ needs.setup-build.outputs.parallel }}
+      QEMU: ${{ needs.setup-build.outputs.maxqemu }}
+      BOLT: ${{ needs.setup-build.outputs.boltthreads }}
+      XZ: ${{ needs.setup-build.outputs.xzthreads }}
     steps:
-      - name: Checkout kernel source (PGO 1)
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           repository: CypherNoodle/linux-Sw1-011
-          path: kernel-src
+          path: ${{ env.KSRC }}
           fetch-depth: 0
-          persist-credentials: false
-
-      - name: Download kernel configuration
-        uses: actions/download-artifact@v4
-        with:
-          name: kernel-config
-          path: kernel-src/
-
-      # FIX CRÍTICO (Persistencia): Restauramos el nombre original (.config)
-      - name: Restore config file
-        working-directory: kernel-src
-        run: mv kconfig .config
-
-      - name: Download baseline vmlinux
-        uses: actions/download-artifact@v4
-        with:
-          name: vmlinux-build1
-          path: kernel-src/
-
-      - name: Restore bzImage location
-        working-directory: kernel-src
-        run: |
-            mkdir -p arch/x86/boot
-            find . -name bzImage -exec cp {} arch/x86/boot/bzImage \;
-
-      - name: Restore compiler caches
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ github.workspace }}/.ccache
-            ${{ github.workspace }}/.sccache
-          key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
-          restore-keys: compilercache-${{ runner.os }}-clang19-v19-
-
-      - name: Collect PGO profiles (round 1)
-        working-directory: kernel-src
-        run: |
-          mkdir -p profdata
-          for i in $(seq 1 $MAXQEMU); do
-            (
-              echo "QEMU instance $i (round 1)"
-              dd if=/dev/zero of=disk$i.img bs=1M count=256
-              mkfs.ext4 disk$i.img
-              # Grabamos perfiles con perf, creando archivos como root
-              sudo perf record -o profdata/perf$i.data -e cycles:u \
-                qemu-system-x86_64 -kernel arch/x86/boot/bzImage \
-                -append "console=ttyS0" -drive file=disk$i.img,format=raw \
-                -nographic -m 1024M -monitor none >/dev/null 2>&1 &
-              QEMU_PID=$!
-              sleep 10
-              sudo kill $QEMU_PID || true
-              perf script > profdata/perf$i.out || true
-              rm -f disk$i.img
-            ) &
-          done
-          wait
-          
-          # FIX CRÍTICO (Permisos EACCES): Cambia el dueño de los archivos de root a runner ($USER)
-          echo "Cambiando permisos de profdata a $USER"
-          sudo chown -R $USER:$USER profdata
-          
-          if compgen -G "profdata/*.profraw" > /dev/null; then
-            llvm-profdata-19 merge -o profdata/kernel.profdata profdata/*.profraw
-          fi
-
-      - name: Upload profdata
-        uses: actions/upload-artifact@v4
-        with:
-          name: profdata
-          path: kernel-src/profdata
-
-# ------------------------------
-# 3) Build final con PGO round 1 + BOLT
-# FIX: Restauración de .config y rendimiento (-s)
-# ------------------------------
-  build-final-auto:
-    needs:
-      - build-incremental
-      - pgo-auto
-    runs-on: ubuntu-latest
-    env:
-      PARALLEL: ${{ needs.setup.outputs.parallel }}
-      BOLTTHREADS: ${{ needs.setup.outputs.boltthreads }}
-    steps:
-      - name: Checkout kernel source (Build Final 1)
-        uses: actions/checkout@v4
-        with:
-          repository: CypherNoodle/linux-Sw1-011
-          path: kernel-src
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Download kernel configuration
-        uses: actions/download-artifact@v4
-        with:
-          name: kernel-config
-          path: kernel-src/
-
-      # FIX CRÍTICO (Persistencia): Restauramos configuración
-      - name: Restore config file
-        working-directory: kernel-src
-        run: mv kconfig .config
-
-      - name: Download baseline artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: vmlinux-build1
-          path: kernel-src/
 
       - uses: actions/download-artifact@v4
         with:
-          name: profdata
-          path: kernel-src/profdata
-        
-      - name: Install dependencies
+          name: base
+          path: ${{ env.KSRC }}
+
+      - name: Preparar Initramfs
+        working-directory: ${{ env.KSRC }}
         run: |
-          set -euo pipefail
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 19
-          sudo apt update
-          sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
-          libncurses-dev libncurses5-dev fakeroot dpkg-dev debhelper dwarves zstd git \
-          qemu-system-x86 qemu-kvm ccache sccache linux-tools-common linux-tools-generic \
-          linux-tools-$(uname -r) zlib1g-dev xz-utils rsync
+          mkdir -p prof prof2 afdo afdo2
+          cp arch/x86/boot/bzImage bz
+          cat << EOF > init-script.sh
+          #!/bin/sh
+          mount -t proc proc /proc
+          mount -t sysfs sys /sys
+          echo "Carga de trabajo kernel..."
+          dd if=/dev/zero of=/dev/null bs=1M count=1024
+          i=0; while [ \$i -lt 1000 ]; do echo \$i >/dev/null; i=\$((i+1)); done
+          poweroff
+          EOF
+          chmod +x init-script.sh
+          echo init-script.sh | cpio -o -H newc > initramfs.cpio
 
-      - name: Restore compiler caches
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ github.workspace }}/.ccache
-            ${{ github.workspace }}/.sccache
-          key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
-          restore-keys: compilercache-${{ runner.os }}-clang19-v19-
-        
-      - name: Update kernel configuration
-        working-directory: kernel-src
+      - name: PGO + AutoFDO Rondas 1 y 2
+        working-directory: ${{ env.KSRC }}
         run: |
-          make olddefconfig || true
-
-      - name: Final incremental build with PGO round 1 + BOLT + AutoFDO
-        working-directory: kernel-src
-        run: |
-          PROFILE=profdata/kernel.profdata
-          if [ -f "$PROFILE" ]; then
-            export CFLAGS_KERNEL="-flto=thin -fprofile-use=$PROFILE"
-            export LDFLAGS_vmlinux="-flto -fuse-ld=lld -fprofile-use=$PROFILE"
-          fi
-          # OPTIMIZACIÓN: Añadido -s (silent)
-          make -j$PARALLEL -s vmlinux bzImage modules | tee final_auto.log
-          
-          # BOLT Optimization
-          cat profdata/perf*.out 2>/dev/null > profdata/perf_all.out || true
-          if [ -s profdata/perf_all.out ]; then
-              echo "Aplicando optimizaciones BOLT..."
-              llvm-bolt-19 vmlinux -o vmlinux.bolt \
-                -reorder-blocks=ext-tsp \
-                -reorder-functions=hfsort \
-                -split-functions \
-                -icf=1 \
-                -dyno-trace=profdata/perf_all.out \
-                -threads=$BOLTTHREADS | tee bolt.log
-              
-              if [ -f vmlinux.bolt ] && [ -s vmlinux.bolt ]; then
-                mv vmlinux.bolt vmlinux
-              fi
-          fi
-
-      - name: Upload vmlinux round 1
-        uses: actions/upload-artifact@v4
-        with:
-          name: vmlinux-build2
-          path: |
-            kernel-src/vmlinux
-            kernel-src/arch/x86/boot/bzImage
-
-# ------------------------------
-# 4) Segundo round de PGO + AutoFDO
-# FIX: Permisos (chown) y Restauración de .config
-# ------------------------------
-  pgo-auto-2:
-    needs: build-final-auto
-    runs-on: ubuntu-latest
-    env:
-      PARALLEL: ${{ needs.setup.outputs.parallel }}
-      MAXQEMU: ${{ needs.setup.outputs.maxqemu }}
-    steps:
-      - name: Checkout kernel source (PGO 2)
-        uses: actions/checkout@v4
-        with:
-          repository: CypherNoodle/linux-Sw1-011
-          path: kernel-src
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Download kernel configuration
-        uses: actions/download-artifact@v4
-        with:
-          name: kernel-config
-          path: kernel-src/
-
-      # FIX CRÍTICO (Persistencia): Restauramos el nombre original (.config)
-      - name: Restore config file
-        working-directory: kernel-src
-        run: mv kconfig .config
-
-      - name: Download previous vmlinux
-        uses: actions/download-artifact@v4
-        with:
-          name: vmlinux-build2
-          path: kernel-src/
-    
-      - name: Restore bzImage location
-        working-directory: kernel-src
-        run: |
-            mkdir -p arch/x86/boot
-            find . -name bzImage -exec cp {} arch/x86/boot/bzImage \;
-
-      - name: Restore compiler caches
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ github.workspace }}/.ccache
-            ${{ github.workspace }}/.sccache
-          key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
-          restore-keys: compilercache-${{ runner.os }}-clang19-v19-
-
-      - name: Collect PGO profiles (round 2)
-        working-directory: kernel-src
-        run: |
-          mkdir -p profdata2
-          for i in $(seq 1 $MAXQEMU); do
-            (
-              echo "QEMU instance $i (round 2)"
-              dd if=/dev/zero of=disk2_$i.img bs=1M count=256
-              mkfs.ext4 disk2_$i.img
-              # Grabamos perfiles con perf, creando archivos como root
-              sudo perf record -o profdata2/perf$i.data -e cycles:u \
-                qemu-system-x86_64 -kernel arch/x86/boot/bzImage \
-                -append "console=ttyS0" -drive file=disk2_$i.img,format=raw \
-                -nographic -m 1024M -monitor none >/dev/null 2>&1 &
-              QEMU_PID=$!
-              sleep 10
-              sudo kill $QEMU_PID || true
-              perf script > profdata2/perf$i.out || true
-              rm -f disk2_$i.img
-            ) &
+          for R in 1 2; do
+            PROF_DIR=prof${R:-}
+            AFDO_DIR=afdo${R:-}
+            mkdir -p $PROF_DIR $AFDO_DIR
+            for i in $(seq 1 $QEMU); do
+              sudo perf record -o $PROF_DIR/p$i.data -e cycles:u \
+                qemu-system-x86_64 -kernel bz -initrd initramfs.cpio -append "console=ttyS0 quiet" \
+                -nographic -m 1024M -no-reboot >/dev/null 2>&1 &
+              PID=$!; sleep $QEMU_PROFILE_TIME && sudo kill $PID || true
+              perf script -i $PROF_DIR/p$i.data > $PROF_DIR/o$i || true
+            done
+            cat $PROF_DIR/o* > $PROF_DIR/all || true
+            [ -s $PROF_DIR/all ] && create_llvm_prof --binary=vmlinux --pgo-data=$PROF_DIR/all --output=$AFDO_DIR/kernel.afdo
           done
-          wait
-          
-          # FIX CRÍTICO (Permisos EACCES): Cambia el dueño de los archivos de root a runner ($USER)
-          echo "Cambiando permisos de profdata2 a $USER"
-          sudo chown -R $USER:$USER profdata2
-          
-          if compgen -G "profdata2/*.profraw" > /dev/null; then
-            llvm-profdata-19 merge -o profdata2/kernel.profdata profdata2/*.profraw
+
+      - name: Build Final Kernel + BOLT
+        working-directory: ${{ env.KSRC }}
+        run: |
+          AFDO=afdo2/kernel.afdo
+          [ -f "$AFDO" ] && export CFLAGS_KERNEL="-flto=thin -fauto-profile-use=$AFDO" || export CFLAGS_KERNEL="-flto=thin"
+          export CC="clang-${LLVM_VERSION}"
+          export HOSTCC="clang-${LLVM_VERSION}"
+          export HOSTCXX="clang++-${LLVM_VERSION}"
+          export LD=lld
+          make -j$PAR -s vmlinux bzImage modules
+
+          # Aplicar BOLT
+          cat prof2/o* > prof2/all || true
+          if [ -s prof2/all ]; then
+            llvm-bolt-${LLVM_VERSION} vmlinux -o vmlinux.bolt \
+              -reorder-blocks=ext-tsp -reorder-functions=hfsort \
+              -split-functions -icf=1 -dyno-trace=prof2/all -threads=$BOLT
+            [ -s vmlinux.bolt ] && mv vmlinux.bolt vmlinux
           fi
 
-      - name: Upload profdata2
-        uses: actions/upload-artifact@v4
-        with:
-          name: profdata2
-          path: kernel-src/profdata2
-
-# ------------------------------
-# 5) Build final y Release
-# FIX: Restauración de .config y rendimiento (-s)
-# ------------------------------
-  build-final-auto-2:
-    needs:
-      - build-final-auto
-      - pgo-auto-2
-    runs-on: ubuntu-latest
-    env:
-      PARALLEL: ${{ needs.setup.outputs.parallel }}
-      BOLTTHREADS: ${{ needs.setup.outputs.boltthreads }}
-      XZTHREADS: ${{ needs.setup.outputs.xzthreads }}
-    steps:
-      - name: Checkout kernel source (Final Release)
-        uses: actions/checkout@v4
-        with:
-          repository: CypherNoodle/linux-Sw1-011
-          path: kernel-src
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Download kernel configuration
-        uses: actions/download-artifact@v4
-        with:
-          name: kernel-config
-          path: kernel-src/
-
-      # FIX CRÍTICO (Persistencia): Restauramos el nombre original (.config)
-      - name: Restore config file
-        working-directory: kernel-src
-        run: mv kconfig .config
-
-      - name: Download baseline artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: vmlinux-build1
-          path: kernel-src/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: profdata2
-          path: kernel-src/profdata2
-        
-      - name: Install dependencies
+      - name: Build .deb y Release
+        working-directory: ${{ env.KSRC }}
         run: |
-          set -euo pipefail
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 19
-          sudo apt update
-          sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
-          libncurses-dev libncurses5-dev fakeroot dpkg-dev debhelper dwarves zstd git \
-          qemu-system-x86 qemu-kvm ccache sccache linux-tools-common linux-tools-generic \
-          linux-tools-$(uname -r) zlib1g-dev xz-utils rsync
-
-      - name: Restore compiler caches
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ github.workspace }}/.ccache
-            ${{ github.workspace }}/.sccache
-          key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
-          restore-keys: compilercache-${{ runner.os }}-clang19-v19-
-        
-      - name: Update kernel configuration for final build
-        working-directory: kernel-src
-        run: |
-          make olddefconfig || true
-
-      - name: Final incremental build with PGO round 2 + BOLT + AutoFDO
-        working-directory: kernel-src
-        run: |
-          PROFILE=profdata2/kernel.profdata
-          if [ -f "$PROFILE" ]; then
-            export CFLAGS_KERNEL="-flto=thin -fprofile-use=$PROFILE"
-            export LDFLAGS_vmlinux="-flto -fuse-ld=lld -fprofile-use=$PROFILE"
-          fi
-          # OPTIMIZACIÓN: Añadido -s (silent)
-          make -j$PARALLEL -s vmlinux modules | tee finalautoround2.log
-          
-          # Aplicar BOLT Round 2
-          cat profdata2/perf*.out 2>/dev/null > profdata2/perf_all.out || true
-          if [ -s profdata2/perf_all.out ]; then
-              llvm-bolt-19 vmlinux -o vmlinux.bolt \
-                -reorder-blocks=ext-tsp \
-                -reorder-functions=hfsort \
-                -split-functions \
-                -icf=1 \
-                -dyno-trace=profdata2/perf_all.out \
-                -threads=$BOLTTHREADS | tee boltround2.log
-              if [ -f vmlinux.bolt ] && [ -s vmlinux.bolt ]; then
-                mv vmlinux.bolt vmlinux
-              fi
-          fi
-
-      - name: Build .deb packages + SHA256
-        working-directory: kernel-src
-        run: |
-          export DEBBUILDOPTIONS="parallel=$PARALLEL"
-          rm -rf ../debs2
-          mkdir -p ../debs2
-          
-          # OPTIMIZACIÓN: Añadido -s (silent)
-          make -j$PARALLEL -s bindeb-pkg LOCALVERSION="-${{ github.run_number }}-final" | tee debround2.log
-          
-          cp ../*.deb ../debs2/
-          cd ../debs2
+          rm -rf ../debout; mkdir -p ../debout
+          export DEB_COMPRESSOR_OPTIONS="-T$XZ"
+          make -j$PAR -s bindeb-pkg LOCALVERSION="-${{ github.run_number }}-opt"
+          mv ../*.deb ../debout/
+          cd ../debout
           sha256sum *.deb > SHA256SUMS.txt
+          PREV=$(git describe --tags --abbrev=0 --match "v*" HEAD^ 2>/dev/null || echo "")
+          if [ -n "$PREV" ]; then git log "$PREV"..HEAD --pretty=format:"%h - %s" > ../CHANGELOG.txt; else git log --reverse --max-count=50 --pretty=format:"%h - %s" > ../CHANGELOG.txt; fi
 
-      - name: Generate CHANGELOG
-        working-directory: kernel-src
-        run: |
-          PREV=$(git describe --tags --abbrev=0 --match "v*" HEAD^ 2>/dev/null || true)
-          if [ -n "$PREV" ]; then
-            git log --pretty=format:"%h - %s (%an)" "$PREV"..HEAD > ../CHANGELOG.txt
-          else
-            git log --reverse --max-count=30 --pretty=format:"%h - %s (%an)" > ../CHANGELOG.txt
-          fi
-
-      - name: Upload final release artifacts
+      - name: Publicar Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            debs2/*.deb
-            debs2/SHA256SUMS.txt
+            debout/*.deb
+            debout/SHA256SUMS.txt
             ../CHANGELOG.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
