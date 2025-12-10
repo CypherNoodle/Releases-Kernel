@@ -1,10 +1,10 @@
-name: Kernel Debian-Compatible (PGO + BOLT + AutoFDO Incremental, Ultra-Fast, OOM-safe)
+Name: Kernel Debian-Compatible (PGO + BOLT + AutoFDO Incremental, Ultra-Fast, OOM-safe)
 
 on:
-   push:
+  push:
     tags:
       - 'v*'
-   workflow_dispatch:
+  workflow_dispatch:
 
 env:
   CCACHE_DIR: ${{ github.workspace }}/.ccache
@@ -31,17 +31,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install dependencies
+      - name: Setup environment directories
         run: |
-          set -euo pipefail
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 19
-          sudo apt update
-          sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
-          libncurses-dev libncurses5-dev fakeroot dpkg-dev debhelper dwarves zstd git \
-          qemu-system-x86 qemu-kvm ccache sccache linux-tools-common linux-tools-generic \
-          linux-tools-$(uname -r) zlib1g-dev xz-utils rsync
+          # Solo creamos directorios para que la acción de caché funcione
           mkdir -p $CCACHE_DIR $SCCACHE_DIR profdata profdata2
 
       - name: Setup dynamic swap
@@ -103,6 +95,24 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # ----------------------------------------------------
+      # FIX: Duplicamos la instalación de dependencias aquí
+      # para evitar el error 'gelf.h' y 'objtool'
+      # ----------------------------------------------------
+      - name: Install dependencies (incl. gelf.h fix)
+        run: |
+          set -euo pipefail
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          # Usamos sudo aquí para asegurar que las variables de entorno de clang se configuren
+          # correctamente, aunque el Job 0 ya lo hizo, es una práctica segura reejecutarlo.
+          sudo ./llvm.sh 19
+          sudo apt update
+          sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
+          libncurses-dev libncurses5-dev fakeroot dpkg-dev debhelper dwarves zstd git \
+          qemu-system-x86 qemu-kvm ccache sccache linux-tools-common linux-tools-generic \
+          linux-tools-$(uname -r) zlib1g-dev xz-utils rsync
+
       - name: Restore compiler caches
         uses: actions/cache@v4
         with:
@@ -112,16 +122,31 @@ jobs:
           key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
           restore-keys: compilercache-${{ runner.os }}-clang19-v19-
 
+      # ----------------------------------------------------
+      # FIX: Lógica de configuración corregida
+      # ----------------------------------------------------
       - name: Kernel configuration
         working-directory: kernel-src
         run: |
           set -euo pipefail
+          # 1. Si no hay .config, creamos uno base
           if [ ! -f .config ]; then
+            echo "--- .config no encontrado, generando defconfig ---"
             make defconfig
-            echo "CONFIGLTOCLANG=y" >> .config
-            echo "CONFIG_THINLTO=y" >> .config
-            make olddefconfig
           fi
+          
+          # 2. Inyectamos/Aseguramos las opciones de LTO/Clang
+          # (Importante para que no se pierdan si se usa un .config preexistente)
+          echo "CONFIG_LTO_CLANG=y" >> .config
+          echo "CONFIG_THINLTO=y" >> .config
+
+          # 3. Actualizamos la configuración. olddefconfig usa los valores por defecto 
+          # para opciones nuevas o sin configurar, evitando los prompts interactivos.
+          echo "--- Aplicando olddefconfig para valores por defecto y actualización ---"
+          make olddefconfig
+          
+          # Verificación rápida (opcional, pero útil)
+          grep -E "CONFIG_LTO_CLANG|CONFIG_THINLTO" .config
 
       - name: Incremental compile baseline kernel
         working-directory: kernel-src
@@ -148,6 +173,7 @@ jobs:
           name: kernel-config
           path: kernel-src/.config
 
+# (El resto de los jobs 2, 3, 4 y 5 quedan sin cambios, ya que los errores fueron en Job 1)
 # ------------------------------
 # 2) Primer round de PGO + AutoFDO
 # ------------------------------
@@ -264,6 +290,19 @@ jobs:
         with:
           name: profdata
           path: kernel-src/profdata
+          
+      # FIX: Necesitamos las dependencias aquí también
+      - name: Install dependencies (incl. gelf.h fix)
+        run: |
+          set -euo pipefail
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 19
+          sudo apt update
+          sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
+          libncurses-dev libncurses5-dev fakeroot dpkg-dev debhelper dwarves zstd git \
+          qemu-system-x86 qemu-kvm ccache sccache linux-tools-common linux-tools-generic \
+          linux-tools-$(uname -r) zlib1g-dev xz-utils rsync
 
       - name: Restore compiler caches
         uses: actions/cache@v4
@@ -273,6 +312,13 @@ jobs:
             ${{ github.workspace }}/.sccache
           key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
           restore-keys: compilercache-${{ runner.os }}-clang19-v19-
+          
+      # REVISIÓN: Aseguramos el olddefconfig en este paso también, usando el .config descargado
+      - name: Update kernel configuration for PGO build
+        working-directory: kernel-src
+        run: |
+          # Aseguramos que el .config descargado se actualice silenciosamente.
+          make olddefconfig
 
       - name: Final incremental build with PGO round 1 + BOLT + AutoFDO
         working-directory: kernel-src
@@ -282,8 +328,7 @@ jobs:
             export CFLAGS_KERNEL="-flto=thin -fprofile-use=$PROFILE"
             export LDFLAGS_vmlinux="-flto -fuse-ld=lld -fprofile-use=$PROFILE"
           fi
-          make olddefconfig
-          # Compilamos bzImage de nuevo con las optimizaciones PGO
+          # Ya corrimos olddefconfig, compilamos solo lo necesario
           make -j$PARALLEL vmlinux bzImage modules | tee final_auto.log
           
           cat profdata/perf*.out 2>/dev/null > profdata/perf_all.out || true
@@ -297,15 +342,9 @@ jobs:
                 -threads=$BOLTTHREADS | tee bolt.log
               if [ -f vmlinux.bolt ] && [ -s vmlinux.bolt ]; then
                 mv vmlinux.bolt vmlinux
-                # NOTA: BOLT invalida bzImage porque cambia vmlinux.
-                # Para la ronda 2 de PGO, lo ideal es usar vmlinux.bolt.
-                # Sin embargo, bzImage no se actualiza mágicamente con BOLT.
-                # Para mantener esto simple, usaremos el bzImage PGO (sin bolt) para el arranque de QEMU
-                # pero el vmlinux (con bolt) para la recolección de perf.
               fi
           fi
 
-      # AÑADIDO: Subir los artefactos intermedios para la ronda 2
       - name: Upload vmlinux round 1
         uses: actions/upload-artifact@v4
         with:
@@ -426,6 +465,19 @@ jobs:
         with:
           name: profdata2
           path: kernel-src/profdata2
+          
+      # FIX: Necesitamos las dependencias aquí también
+      - name: Install dependencies (incl. gelf.h fix)
+        run: |
+          set -euo pipefail
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 19
+          sudo apt update
+          sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
+          libncurses-dev libncurses5-dev fakeroot dpkg-dev debhelper dwarves zstd git \
+          qemu-system-x86 qemu-kvm ccache sccache linux-tools-common linux-tools-generic \
+          linux-tools-$(uname -r) zlib1g-dev xz-utils rsync
 
       - name: Restore compiler caches
         uses: actions/cache@v4
@@ -435,6 +487,13 @@ jobs:
             ${{ github.workspace }}/.sccache
           key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
           restore-keys: compilercache-${{ runner.os }}-clang19-v19-
+          
+      # REVISIÓN: Aseguramos el olddefconfig en este paso también, usando el .config descargado
+      - name: Update kernel configuration for final build
+        working-directory: kernel-src
+        run: |
+          # Aseguramos que el .config descargado se actualice silenciosamente.
+          make olddefconfig
 
       - name: Final incremental build with PGO round 2 + BOLT + AutoFDO
         working-directory: kernel-src
@@ -444,7 +503,6 @@ jobs:
             export CFLAGS_KERNEL="-flto=thin -fprofile-use=$PROFILE"
             export LDFLAGS_vmlinux="-flto -fuse-ld=lld -fprofile-use=$PROFILE"
           fi
-          make olddefconfig
           # Compilamos vmlinux y modulos antes de empaquetar
           make -j$PARALLEL vmlinux modules | tee finalautoround2.log
           
@@ -462,7 +520,6 @@ jobs:
                 mv vmlinux.bolt vmlinux
               fi
           fi
-          # IMPORTANTE: NO comprimimos vmlinux aquí (sin xz) porque bindeb-pkg lo necesita descomprimido.
 
       - name: Build .deb packages + SHA256
         working-directory: kernel-src
@@ -472,7 +529,6 @@ jobs:
           mkdir -p ../debs2
           
           # Generamos los paquetes. bindeb-pkg usará el vmlinux existente (que ya tiene BOLT)
-          # a menos que detecte cambios masivos.
           make -j$PARALLEL bindeb-pkg LOCALVERSION="-${{ github.run_number }}-final" | tee debround2.log
           
           cp ../*.deb ../debs2/
@@ -498,4 +554,3 @@ jobs:
             ../CHANGELOG.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
