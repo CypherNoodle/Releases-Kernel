@@ -1,4 +1,4 @@
-Name: Kernel Debian-Compatible (PGO + BOLT + AutoFDO Incremental, Ultra-Fast, OOM-safe)
+name: Kernel Debian-Compatible (PGO + BOLT + AutoFDO Incremental, Ultra-Fast, OOM-safe)
 
 on:
   push:
