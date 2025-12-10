@@ -1,4 +1,4 @@
-name: Kernel Debian-Compatible (PGO + BOLT + AutoFDO Incremental, Ultra-Fast, OOM-safe)
+name: Kernel Acer SW1-011 Debian (PGO x2 + BOLT + AutoFDO Incremental, Ultra-Fast, OOM-safe)
 
 on:
   push:
@@ -34,7 +34,6 @@ jobs:
       - name: Setup environment directories
         run: mkdir -p $CCACHE_DIR $SCCACHE_DIR profdata profdata2
 
-      # Configuración de SWAP para evitar errores OOM (Out Of Memory)
       - name: Setup dynamic swap
         id: swap
         run: |
@@ -50,16 +49,13 @@ jobs:
               echo "swapfile=none" >> $GITHUB_OUTPUT
           fi
 
-      # Cálculo de hilos para no saturar la CPU del runner
       - name: Calculate safe parallelism & threads
         id: calc-parallel
         run: |
           MEM=$(free -m | awk '/^Mem:/ {print $2}')
-          # Regla conservadora: 1 hilo por cada 1.5GB de RAM para compilación pesada con LTO
           PARALLEL=$(( MEM / 1500 ))
           PARALLEL=$(( PARALLEL < 1 ? 1 : PARALLEL ))
           
-          # QEMU consume mucha RAM, limitamos instancias
           MAX_QEMU=$(( MEM / 1024 ))
           MAX_QEMU=$(( MAX_QEMU < 1 ? 1 : MAX_QEMU ))
           MAX_QEMU=$(( MAX_QEMU > 4 ? 4 : MAX_QEMU ))
@@ -84,7 +80,7 @@ jobs:
 
 # ------------------------------
 # 1) Build incremental base
-# Este paso fallaba al subir el artifact. Se ha corregido renombrando .config
+# FIX: Persistencia de .config (kconfig) y rendimiento (-s)
 # ------------------------------
   build-incremental:
     needs: setup
@@ -126,20 +122,17 @@ jobs:
         run: |
           set -euo pipefail
           
-          # 1. Generar configuración base si no existe
           if [ ! -f .config ]; then
             echo "--- .config no encontrado, generando defconfig ---"
             make defconfig
           fi
           
-          # 2. Limpieza y activación de LTO (ThinLTO para velocidad)
           sed -i '/CONFIG_LTO_CLANG/d' .config
           sed -i '/CONFIG_THINLTO/d' .config
           
           echo "CONFIG_LTO_CLANG=y" >> .config
           echo "CONFIG_THINLTO=y" >> .config
           
-          # 3. FIX CRÍTICO: Quitamos "|| true". Si esto falla, queremos que el build pare aquí.
           echo "--- Aplicando olddefconfig ---"
           make olddefconfig
 
@@ -151,10 +144,10 @@ jobs:
           export HOSTCC="ccache clang-19"
           export HOSTCXX="ccache clang++-19"
           export LD=lld
-          make -j$PARALLEL vmlinux bzImage modules | tee baseline_incremental.log
+          # OPTIMIZACIÓN: Añadido -s (silent)
+          make -j$PARALLEL -s vmlinux bzImage modules | tee baseline_incremental.log
           
-          # FIX CRÍTICO: Copiamos .config (oculto) a kconfig (visible)
-          # Esto asegura que el upload-artifact NO falle.
+          # FIX CRÍTICO (Persistencia): Copiamos .config (oculto) a kconfig (visible)
           cp .config kconfig
 
       - name: Upload vmlinux baseline
@@ -169,12 +162,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kernel-config
-          # Subimos el archivo visible
           path: kernel-src/kconfig
 
 # ------------------------------
 # 2) Primer round de PGO + AutoFDO
-# Aquí fallaba la descarga. Ahora renombramos kconfig -> .config
+# FIX: Permisos (chown) y Restauración de .config
 # ------------------------------
   pgo-auto:
     needs: build-incremental
@@ -197,7 +189,7 @@ jobs:
           name: kernel-config
           path: kernel-src/
 
-      # FIX CRÍTICO: Restauramos el nombre original para que make lo reconozca
+      # FIX CRÍTICO (Persistencia): Restauramos el nombre original (.config)
       - name: Restore config file
         working-directory: kernel-src
         run: mv kconfig .config
@@ -230,14 +222,13 @@ jobs:
           for i in $(seq 1 $MAXQEMU); do
             (
               echo "QEMU instance $i (round 1)"
-              # Creamos discos temporales para arrancar QEMU
               dd if=/dev/zero of=disk$i.img bs=1M count=256
               mkfs.ext4 disk$i.img
-              # Grabamos perfiles con perf
+              # Grabamos perfiles con perf, creando archivos como root
               sudo perf record -o profdata/perf$i.data -e cycles:u \
                 qemu-system-x86_64 -kernel arch/x86/boot/bzImage \
                 -append "console=ttyS0" -drive file=disk$i.img,format=raw \
-                -nographic -m 1024M -monitor none &
+                -nographic -m 1024M -monitor none >/dev/null 2>&1 &
               QEMU_PID=$!
               sleep 10
               sudo kill $QEMU_PID || true
@@ -246,7 +237,11 @@ jobs:
             ) &
           done
           wait
-          # Fusionamos los perfiles raw en un formato legible por Clang
+          
+          # FIX CRÍTICO (Permisos EACCES): Cambia el dueño de los archivos de root a runner ($USER)
+          echo "Cambiando permisos de profdata a $USER"
+          sudo chown -R $USER:$USER profdata
+          
           if compgen -G "profdata/*.profraw" > /dev/null; then
             llvm-profdata-19 merge -o profdata/kernel.profdata profdata/*.profraw
           fi
@@ -259,6 +254,7 @@ jobs:
 
 # ------------------------------
 # 3) Build final con PGO round 1 + BOLT
+# FIX: Restauración de .config y rendimiento (-s)
 # ------------------------------
   build-final-auto:
     needs:
@@ -283,7 +279,7 @@ jobs:
           name: kernel-config
           path: kernel-src/
 
-      # FIX CRÍTICO: Restauramos configuración
+      # FIX CRÍTICO (Persistencia): Restauramos configuración
       - name: Restore config file
         working-directory: kernel-src
         run: mv kconfig .config
@@ -333,7 +329,8 @@ jobs:
             export CFLAGS_KERNEL="-flto=thin -fprofile-use=$PROFILE"
             export LDFLAGS_vmlinux="-flto -fuse-ld=lld -fprofile-use=$PROFILE"
           fi
-          make -j$PARALLEL vmlinux bzImage modules | tee final_auto.log
+          # OPTIMIZACIÓN: Añadido -s (silent)
+          make -j$PARALLEL -s vmlinux bzImage modules | tee final_auto.log
           
           # BOLT Optimization
           cat profdata/perf*.out 2>/dev/null > profdata/perf_all.out || true
@@ -347,7 +344,6 @@ jobs:
                 -dyno-trace=profdata/perf_all.out \
                 -threads=$BOLTTHREADS | tee bolt.log
               
-              # Si BOLT tuvo éxito, reemplazamos el vmlinux original
               if [ -f vmlinux.bolt ] && [ -s vmlinux.bolt ]; then
                 mv vmlinux.bolt vmlinux
               fi
@@ -363,6 +359,7 @@ jobs:
 
 # ------------------------------
 # 4) Segundo round de PGO + AutoFDO
+# FIX: Permisos (chown) y Restauración de .config
 # ------------------------------
   pgo-auto-2:
     needs: build-final-auto
@@ -385,7 +382,7 @@ jobs:
           name: kernel-config
           path: kernel-src/
 
-      # FIX CRÍTICO: Restauramos configuración
+      # FIX CRÍTICO (Persistencia): Restauramos el nombre original (.config)
       - name: Restore config file
         working-directory: kernel-src
         run: mv kconfig .config
@@ -420,10 +417,11 @@ jobs:
               echo "QEMU instance $i (round 2)"
               dd if=/dev/zero of=disk2_$i.img bs=1M count=256
               mkfs.ext4 disk2_$i.img
+              # Grabamos perfiles con perf, creando archivos como root
               sudo perf record -o profdata2/perf$i.data -e cycles:u \
                 qemu-system-x86_64 -kernel arch/x86/boot/bzImage \
                 -append "console=ttyS0" -drive file=disk2_$i.img,format=raw \
-                -nographic -m 1024M -monitor none &
+                -nographic -m 1024M -monitor none >/dev/null 2>&1 &
               QEMU_PID=$!
               sleep 10
               sudo kill $QEMU_PID || true
@@ -432,6 +430,11 @@ jobs:
             ) &
           done
           wait
+          
+          # FIX CRÍTICO (Permisos EACCES): Cambia el dueño de los archivos de root a runner ($USER)
+          echo "Cambiando permisos de profdata2 a $USER"
+          sudo chown -R $USER:$USER profdata2
+          
           if compgen -G "profdata2/*.profraw" > /dev/null; then
             llvm-profdata-19 merge -o profdata2/kernel.profdata profdata2/*.profraw
           fi
@@ -444,6 +447,7 @@ jobs:
 
 # ------------------------------
 # 5) Build final y Release
+# FIX: Restauración de .config y rendimiento (-s)
 # ------------------------------
   build-final-auto-2:
     needs:
@@ -469,7 +473,7 @@ jobs:
           name: kernel-config
           path: kernel-src/
 
-      # FIX CRÍTICO: Restauramos configuración
+      # FIX CRÍTICO (Persistencia): Restauramos el nombre original (.config)
       - name: Restore config file
         working-directory: kernel-src
         run: mv kconfig .config
@@ -519,8 +523,8 @@ jobs:
             export CFLAGS_KERNEL="-flto=thin -fprofile-use=$PROFILE"
             export LDFLAGS_vmlinux="-flto -fuse-ld=lld -fprofile-use=$PROFILE"
           fi
-          # Compilamos vmlinux y modulos antes de empaquetar
-          make -j$PARALLEL vmlinux modules | tee finalautoround2.log
+          # OPTIMIZACIÓN: Añadido -s (silent)
+          make -j$PARALLEL -s vmlinux modules | tee finalautoround2.log
           
           # Aplicar BOLT Round 2
           cat profdata2/perf*.out 2>/dev/null > profdata2/perf_all.out || true
@@ -544,8 +548,8 @@ jobs:
           rm -rf ../debs2
           mkdir -p ../debs2
           
-          # Generamos los paquetes. bindeb-pkg usará el vmlinux existente (optimizado)
-          make -j$PARALLEL bindeb-pkg LOCALVERSION="-${{ github.run_number }}-final" | tee debround2.log
+          # OPTIMIZACIÓN: Añadido -s (silent)
+          make -j$PARALLEL -s bindeb-pkg LOCALVERSION="-${{ github.run_number }}-final" | tee debround2.log
           
           cp ../*.deb ../debs2/
           cd ../debs2
