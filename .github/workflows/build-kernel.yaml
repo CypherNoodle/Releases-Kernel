@@ -60,6 +60,9 @@ jobs:
             build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
             libncurses-dev debhelper dwarves zstd sccache xz-utils \
             util-linux fakeroot dpkg-dev cpio lld-${{ env.LLVM_VERSION }}
+               
+          # Enlace simbólico requerido por el Kernel
+          sudo ln -sf /usr/bin/ld.lld-${{ env.LLVM_VERSION }} /usr/bin/ld.lld
 
           # Configuración SCCACHE
           echo "SCCACHE_DIR=${{ env.SCCACHE_DIR }}" >> $GITHUB_ENV
