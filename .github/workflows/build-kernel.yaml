@@ -41,7 +41,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.SCCACHE_DIR }}
-          key: sccache-${{ runner.os }}-clang-${{ env.LLVM_VERSION }}-${{ hashFiles(env.KSRC + '/.config') }}
+          key: sccache-${{ runner.os }}-clang-${{ env.LLVM_VERSION }}-${{ hashFiles(format('{0}/.config', env.KSRC)) }}
           restore-keys: sccache-${{ runner.os }}-clang-${{ env.LLVM_VERSION }}-
 
       # -----------------------------------------------
