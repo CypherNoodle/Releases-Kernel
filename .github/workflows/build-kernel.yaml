@@ -13,7 +13,7 @@ env:
 jobs:
 
 # ------------------------------
-# 0) Configuración inicial del runner
+# 0) Configuración inicial (Setup)
 # ------------------------------
   setup:
     runs-on: ubuntu-latest
@@ -32,9 +32,9 @@ jobs:
           persist-credentials: false
 
       - name: Setup environment directories
-        run: |
-          mkdir -p $CCACHE_DIR $SCCACHE_DIR profdata profdata2
+        run: mkdir -p $CCACHE_DIR $SCCACHE_DIR profdata profdata2
 
+      # Configuración de SWAP para evitar errores OOM (Out Of Memory)
       - name: Setup dynamic swap
         id: swap
         run: |
@@ -50,15 +50,20 @@ jobs:
               echo "swapfile=none" >> $GITHUB_OUTPUT
           fi
 
+      # Cálculo de hilos para no saturar la CPU del runner
       - name: Calculate safe parallelism & threads
         id: calc-parallel
         run: |
           MEM=$(free -m | awk '/^Mem:/ {print $2}')
+          # Regla conservadora: 1 hilo por cada 1.5GB de RAM para compilación pesada con LTO
           PARALLEL=$(( MEM / 1500 ))
           PARALLEL=$(( PARALLEL < 1 ? 1 : PARALLEL ))
+          
+          # QEMU consume mucha RAM, limitamos instancias
           MAX_QEMU=$(( MEM / 1024 ))
           MAX_QEMU=$(( MAX_QEMU < 1 ? 1 : MAX_QEMU ))
           MAX_QEMU=$(( MAX_QEMU > 4 ? 4 : MAX_QEMU ))
+          
           BOLT_THREADS=$(( PARALLEL / 2 ))
           BOLT_THREADS=$(( BOLT_THREADS < 1 ? 1 : BOLT_THREADS ))
           XZ_THREADS=$(( PARALLEL / 2 ))
@@ -79,6 +84,7 @@ jobs:
 
 # ------------------------------
 # 1) Build incremental base
+# Este paso fallaba al subir el artifact. Se ha corregido renombrando .config
 # ------------------------------
   build-incremental:
     needs: setup
@@ -101,7 +107,6 @@ jobs:
           chmod +x llvm.sh
           sudo ./llvm.sh 19
           sudo apt update
-          # Instalamos dependencias de compilación, QEMU y utilidades
           sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
           libncurses-dev libncurses5-dev fakeroot dpkg-dev debhelper dwarves zstd git \
           qemu-system-x86 qemu-kvm ccache sccache linux-tools-common linux-tools-generic \
@@ -121,22 +126,22 @@ jobs:
         run: |
           set -euo pipefail
           
-          # 1. Creamos el .config si no existe
+          # 1. Generar configuración base si no existe
           if [ ! -f .config ]; then
             echo "--- .config no encontrado, generando defconfig ---"
             make defconfig
           fi
           
-          # 2. LIMPIAMOS y luego AÑADIMOS las opciones de LTO/Clang para evitar duplicados
+          # 2. Limpieza y activación de LTO (ThinLTO para velocidad)
           sed -i '/CONFIG_LTO_CLANG/d' .config
           sed -i '/CONFIG_THINLTO/d' .config
           
           echo "CONFIG_LTO_CLANG=y" >> .config
           echo "CONFIG_THINLTO=y" >> .config
           
-          # 3. Actualizamos la configuración. El '|| true' evita el fallo por advertencias (exit code 1).
-          echo "--- Aplicando olddefconfig para valores por defecto y actualización ---"
-          make olddefconfig || true
+          # 3. FIX CRÍTICO: Quitamos "|| true". Si esto falla, queremos que el build pare aquí.
+          echo "--- Aplicando olddefconfig ---"
+          make olddefconfig
 
       - name: Incremental compile baseline kernel
         working-directory: kernel-src
@@ -147,6 +152,10 @@ jobs:
           export HOSTCXX="ccache clang++-19"
           export LD=lld
           make -j$PARALLEL vmlinux bzImage modules | tee baseline_incremental.log
+          
+          # FIX CRÍTICO: Copiamos .config (oculto) a kconfig (visible)
+          # Esto asegura que el upload-artifact NO falle.
+          cp .config kconfig
 
       - name: Upload vmlinux baseline
         uses: actions/upload-artifact@v4
@@ -160,10 +169,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kernel-config
-          path: kernel-src/.config
+          # Subimos el archivo visible
+          path: kernel-src/kconfig
 
 # ------------------------------
 # 2) Primer round de PGO + AutoFDO
+# Aquí fallaba la descarga. Ahora renombramos kconfig -> .config
 # ------------------------------
   pgo-auto:
     needs: build-incremental
@@ -185,6 +196,11 @@ jobs:
         with:
           name: kernel-config
           path: kernel-src/
+
+      # FIX CRÍTICO: Restauramos el nombre original para que make lo reconozca
+      - name: Restore config file
+        working-directory: kernel-src
+        run: mv kconfig .config
 
       - name: Download baseline vmlinux
         uses: actions/download-artifact@v4
@@ -214,8 +230,10 @@ jobs:
           for i in $(seq 1 $MAXQEMU); do
             (
               echo "QEMU instance $i (round 1)"
+              # Creamos discos temporales para arrancar QEMU
               dd if=/dev/zero of=disk$i.img bs=1M count=256
               mkfs.ext4 disk$i.img
+              # Grabamos perfiles con perf
               sudo perf record -o profdata/perf$i.data -e cycles:u \
                 qemu-system-x86_64 -kernel arch/x86/boot/bzImage \
                 -append "console=ttyS0" -drive file=disk$i.img,format=raw \
@@ -228,6 +246,7 @@ jobs:
             ) &
           done
           wait
+          # Fusionamos los perfiles raw en un formato legible por Clang
           if compgen -G "profdata/*.profraw" > /dev/null; then
             llvm-profdata-19 merge -o profdata/kernel.profdata profdata/*.profraw
           fi
@@ -239,7 +258,7 @@ jobs:
           path: kernel-src/profdata
 
 # ------------------------------
-# 3) Build final con PGO round 1 + BOLT + AutoFDO
+# 3) Build final con PGO round 1 + BOLT
 # ------------------------------
   build-final-auto:
     needs:
@@ -264,6 +283,11 @@ jobs:
           name: kernel-config
           path: kernel-src/
 
+      # FIX CRÍTICO: Restauramos configuración
+      - name: Restore config file
+        working-directory: kernel-src
+        run: mv kconfig .config
+
       - name: Download baseline artifacts
         uses: actions/download-artifact@v4
         with:
@@ -274,8 +298,8 @@ jobs:
         with:
           name: profdata
           path: kernel-src/profdata
-          
-      - name: Install dependencies (incl. gelf.h fix)
+        
+      - name: Install dependencies
         run: |
           set -euo pipefail
           wget https://apt.llvm.org/llvm.sh
@@ -295,11 +319,10 @@ jobs:
             ${{ github.workspace }}/.sccache
           key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
           restore-keys: compilercache-${{ runner.os }}-clang19-v19-
-          
+        
       - name: Update kernel configuration
         working-directory: kernel-src
         run: |
-          # El '|| true' previene el fallo por advertencias después de descargar el .config.
           make olddefconfig || true
 
       - name: Final incremental build with PGO round 1 + BOLT + AutoFDO
@@ -312,8 +335,10 @@ jobs:
           fi
           make -j$PARALLEL vmlinux bzImage modules | tee final_auto.log
           
+          # BOLT Optimization
           cat profdata/perf*.out 2>/dev/null > profdata/perf_all.out || true
           if [ -s profdata/perf_all.out ]; then
+              echo "Aplicando optimizaciones BOLT..."
               llvm-bolt-19 vmlinux -o vmlinux.bolt \
                 -reorder-blocks=ext-tsp \
                 -reorder-functions=hfsort \
@@ -321,6 +346,8 @@ jobs:
                 -icf=1 \
                 -dyno-trace=profdata/perf_all.out \
                 -threads=$BOLTTHREADS | tee bolt.log
+              
+              # Si BOLT tuvo éxito, reemplazamos el vmlinux original
               if [ -f vmlinux.bolt ] && [ -s vmlinux.bolt ]; then
                 mv vmlinux.bolt vmlinux
               fi
@@ -358,12 +385,17 @@ jobs:
           name: kernel-config
           path: kernel-src/
 
+      # FIX CRÍTICO: Restauramos configuración
+      - name: Restore config file
+        working-directory: kernel-src
+        run: mv kconfig .config
+
       - name: Download previous vmlinux
         uses: actions/download-artifact@v4
         with:
           name: vmlinux-build2
           path: kernel-src/
-      
+    
       - name: Restore bzImage location
         working-directory: kernel-src
         run: |
@@ -403,6 +435,7 @@ jobs:
           if compgen -G "profdata2/*.profraw" > /dev/null; then
             llvm-profdata-19 merge -o profdata2/kernel.profdata profdata2/*.profraw
           fi
+
       - name: Upload profdata2
         uses: actions/upload-artifact@v4
         with:
@@ -410,7 +443,7 @@ jobs:
           path: kernel-src/profdata2
 
 # ------------------------------
-# 5) Build final incremental definitivo y release
+# 5) Build final y Release
 # ------------------------------
   build-final-auto-2:
     needs:
@@ -436,17 +469,23 @@ jobs:
           name: kernel-config
           path: kernel-src/
 
+      # FIX CRÍTICO: Restauramos configuración
+      - name: Restore config file
+        working-directory: kernel-src
+        run: mv kconfig .config
+
       - name: Download baseline artifacts
         uses: actions/download-artifact@v4
         with:
           name: vmlinux-build1
           path: kernel-src/
+
       - uses: actions/download-artifact@v4
         with:
           name: profdata2
           path: kernel-src/profdata2
-          
-      - name: Install dependencies (incl. gelf.h fix)
+        
+      - name: Install dependencies
         run: |
           set -euo pipefail
           wget https://apt.llvm.org/llvm.sh
@@ -466,11 +505,10 @@ jobs:
             ${{ github.workspace }}/.sccache
           key: compilercache-${{ runner.os }}-clang19-v19-${{ hashFiles('kernel-src/.config') }}
           restore-keys: compilercache-${{ runner.os }}-clang19-v19-
-          
+        
       - name: Update kernel configuration for final build
         working-directory: kernel-src
         run: |
-          # El '|| true' previene el fallo por advertencias después de descargar el .config.
           make olddefconfig || true
 
       - name: Final incremental build with PGO round 2 + BOLT + AutoFDO
@@ -484,7 +522,7 @@ jobs:
           # Compilamos vmlinux y modulos antes de empaquetar
           make -j$PARALLEL vmlinux modules | tee finalautoround2.log
           
-          # Aplicar BOLT
+          # Aplicar BOLT Round 2
           cat profdata2/perf*.out 2>/dev/null > profdata2/perf_all.out || true
           if [ -s profdata2/perf_all.out ]; then
               llvm-bolt-19 vmlinux -o vmlinux.bolt \
@@ -506,7 +544,7 @@ jobs:
           rm -rf ../debs2
           mkdir -p ../debs2
           
-          # Generamos los paquetes. bindeb-pkg usará el vmlinux existente (que ya tiene BOLT)
+          # Generamos los paquetes. bindeb-pkg usará el vmlinux existente (optimizado)
           make -j$PARALLEL bindeb-pkg LOCALVERSION="-${{ github.run_number }}-final" | tee debround2.log
           
           cp ../*.deb ../debs2/
