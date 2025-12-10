@@ -13,11 +13,9 @@ env:
 jobs:
   build-kernel:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-
     steps:
       # ----------------------------------------------------
-      # CHECKOUT REAL DEL KERNEL (INCLUYENDO .config)
+      # CHECKOUT DEL KERNEL (USARÁ TU .config EXACTO)
       # ----------------------------------------------------
       - name: Checkout kernel repo
         uses: actions/checkout@v4
@@ -26,7 +24,7 @@ jobs:
           path: ${{ env.KSRC }}
           fetch-depth: 0
 
-      # DEBUG: Confirmar que el .config existe y está bien
+      # Debug: comprobar que el .config se usa sin modificar
       - name: Mostrar .config real (debug)
         run: |
           echo "===== .config REAL DEL REPO ====="
@@ -42,7 +40,7 @@ jobs:
           echo "p=$(nproc)" >> $GITHUB_OUTPUT
 
       # ----------------------------------------------------
-      # CACHE SCCACHE (IMPORTANTE: YA NO USA hashFiles!!!)
+      # CACHE SCCACHE
       # ----------------------------------------------------
       - name: Restaurar Cache de SCCACHE
         uses: actions/cache@v4
@@ -55,7 +53,6 @@ jobs:
       # ----------------------------------------------------
       - name: Instalar dependencias
         run: |
-          # LLVM/Clang
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh ${{ env.LLVM_VERSION }}
@@ -74,34 +71,16 @@ jobs:
           echo "${{ github.workspace }}/.sccache" >> $GITHUB_PATH
 
       # ----------------------------------------------------
-      # CONFIG DEL KERNEL → USAR TU .config SIN DESTRUIRLO
+      # IMPORTANTE: NO TOCAMOS .config
       # ----------------------------------------------------
-      - name: Configuración Kernel
+      - name: Confirmar que NO se regenera .config
         working-directory: ${{ env.KSRC }}
         run: |
-          # Asegurar que usa TU .config del repo
-          yes "" | make oldconfig
-
-          # LTO Thin
-          scripts/config --enable LTO_CLANG
-          scripts/config --enable THINLTO
-          scripts/config --disable LTO_NONE
-
-          # ZSTD en kernel, módulos e initrd
-          scripts/config --enable KERNEL_ZSTD
-          scripts/config --enable MODULE_COMPRESS_ZSTD
-          scripts/config --enable RD_ZSTD
-
-          # Desactivar debug pesado
-          for opt in DEBUG_KERNEL KASAN KCOV PROFILING FRAME_POINTER COMPILE_TEST; do
-            scripts/config --disable $opt
-          done
-
-          # Aplicar nuevos defaults
-          yes "" | make olddefconfig
+          echo "No se hará oldconfig ni olddefconfig."
+          echo "Se usará tu .config EXACTO."
 
       # ----------------------------------------------------
-      # COMPILACIÓN
+      # COMPILACIÓN (ThinLTO + ZSTD mediante flags)
       # ----------------------------------------------------
       - name: Build Kernel
         working-directory: ${{ env.KSRC }}
@@ -114,7 +93,11 @@ jobs:
           KCFLAGS: -O3 -march=x86-64-v2 -funroll-loops -fstrict-aliasing
           LLVM: 1
         run: |
-          make -j${{ steps.calc.outputs.p }} bindeb-pkg LOCALVERSION="-${{ github.run_number }}-opt"
+          make -j${{ steps.calc.outputs.p }} \
+            LLVM=1 \
+            LTO=thin \
+            KBUILD_BUILD_TIMESTAMP="" \
+            bindeb-pkg LOCALVERSION="-${{ github.run_number }}-opt"
 
       # ----------------------------------------------------
       # SHA256 + CHANGELOG
