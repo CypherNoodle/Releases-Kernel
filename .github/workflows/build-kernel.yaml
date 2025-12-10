@@ -1,4 +1,4 @@
-name: Kernel Debian Ultra-Compact PGO+BOLT
+name: Kernel Debian Ultra-Compact ThinLTO + ZSTD + Clang Opt (v2)
 
 on:
   push:
@@ -6,174 +6,140 @@ on:
   workflow_dispatch:
 
 env:
-  CCACHE_DIR: ${{ github.workspace }}/.ccache
   SCCACHE_DIR: ${{ github.workspace }}/.sccache
   KSRC: kernel-src
   LLVM_VERSION: 19
-  QEMU_PROFILE_TIME: 120
 
 jobs:
-  setup-build:
+  build-kernel:
     runs-on: ubuntu-latest
-    outputs:
-      parallel: ${{ steps.calc.outputs.p }}
-      maxqemu: ${{ steps.calc.outputs.q }}
-      boltthreads: ${{ steps.calc.outputs.b }}
-      xzthreads: ${{ steps.calc.outputs.x }}
+    timeout-minutes: 90
+
     steps:
-      - uses: actions/checkout@v4
+      # -----------------------------------------------
+      # Checkout del Repositorio del Kernel
+      # -----------------------------------------------
+      - name: Checkout kernel repo
+        uses: actions/checkout@v4
         with:
           repository: CypherNoodle/linux-Sw1-011
           path: ${{ env.KSRC }}
           fetch-depth: 0
 
-      - name: Setup Cache & Calcular Recursos
+      # -----------------------------------------------
+      # Calcular núcleos CPU
+      # -----------------------------------------------
+      - name: Calcular recursos (nproc)
         id: calc
         run: |
-          mkdir -p $CCACHE_DIR $SCCACHE_DIR prof afdo prof2 afdo2
-          MEM=$(free -m | awk '/^Mem:/ {print $2}')
-          P=$((MEM/2000)); [ $P -lt 1 ] && P=1
-          Q=$((MEM/1500)); [ $Q -lt 1 ] && Q=1; [ $Q -gt 4 ] && Q=4
-          B=$((P/2)); [ $B -lt 1 ] && B=1
-          X=$((P/2)); [ $X -lt 1 ] && X=1
-          echo "p=$P" >> $GITHUB_OUTPUT
-          echo "q=$Q" >> $GITHUB_OUTPUT
-          echo "b=$B" >> $GITHUB_OUTPUT
-          echo "x=$X" >> $GITHUB_OUTPUT
+          echo "p=$(nproc)" >> $GITHUB_OUTPUT
 
-      - uses: actions/cache@v4
+      # -----------------------------------------------
+      # Cache SCCACHE
+      # -----------------------------------------------
+      - name: Restaurar Cache de SCCACHE
+        uses: actions/cache@v4
         with:
-          path: |
-            ${{ env.CCACHE_DIR }}
-            ${{ env.SCCACHE_DIR }}
-          key: cc-${{ runner.os }}-clang-${{ env.LLVM_VERSION }}-${{ hashFiles('${{ env.KSRC }}/.config') }}
+          path: ${{ env.SCCACHE_DIR }}
+          key: sccache-${{ runner.os }}-clang-${{ env.LLVM_VERSION }}-${{ hashFiles(env.KSRC + '/.config') }}
+          restore-keys: sccache-${{ runner.os }}-clang-${{ env.LLVM_VERSION }}-
 
-      - name: Instalar Dependencias
+      # -----------------------------------------------
+      # Dependencias
+      # -----------------------------------------------
+      - name: Instalar dependencias
         run: |
-          wget https://apt.llvm.org/llvm.sh; chmod +x llvm.sh; sudo ./llvm.sh $LLVM_VERSION
-          sudo apt update
-          sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev libdw-dev linux-tools-common linux-tools-generic \
-                             libncurses-dev debhelper dwarves zstd ccache sccache xz-utils qemu-system-x86 fakeroot dpkg-dev cpio util-linux
+          # 1. Instalar LLVM/Clang
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh ${{ env.LLVM_VERSION }}
 
-      - name: Configuración Kernel LTO
+          # 2. Paquetes necesarios
+          sudo apt update
+          sudo apt install -y \
+            build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
+            libncurses-dev debhelper dwarves zstd sccache xz-utils \
+            util-linux fakeroot dpkg-dev cpio lld-${{ env.LLVM_VERSION }}
+
+          # Configuración SCCACHE
+          echo "SCCACHE_DIR=${{ env.SCCACHE_DIR }}" >> $GITHUB_ENV
+          echo "SCCACHE_LOG=info" >> $GITHUB_ENV
+          echo "${{ github.workspace }}/.sccache" >> $GITHUB_PATH
+
+      # -----------------------------------------------
+      # Configuración Kernel (ThinLTO + ZSTD)
+      # -----------------------------------------------
+      - name: Configuración Kernel
         working-directory: ${{ env.KSRC }}
         run: |
           [ ! -f .config ] && make defconfig
-          sed -i '/CONFIG_LTO_CLANG/d;/CONFIG_THINLTO/d' .config
-          echo -e "CONFIG_LTO_CLANG=y\nCONFIG_THINLTO=y\nCONFIG_KEXEC=y" >> .config
-          make olddefconfig
 
-      - name: Build Base
-        working-directory: ${{ env.KSRC }}
-        run: |
-          export CC="sccache clang-${LLVM_VERSION}"
-          export HOSTCC="ccache clang-${LLVM_VERSION}"
-          export HOSTCXX="ccache clang++-${LLVM_VERSION}"
-          export LD=lld
-          make -j${{ steps.calc.outputs.p }} -s vmlinux bzImage modules
-          cp .config kconfig
+          # Activar Clang LTO Thin
+          sed -i '/CONFIG_LTO/d;/CONFIG_THINLTO/d' .config
+          echo "CONFIG_LTO_CLANG=y" >> .config
+          echo "CONFIG_THINLTO=y" >> .config
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: base
-          path: |
-            ${{ env.KSRC }}/vmlinux
-            ${{ env.KSRC }}/arch/x86/boot/bzImage
-            ${{ env.KSRC }}/kconfig
+          # ZSTD kernel + módulos + initrd
+          sed -i \
+            -e 's/CONFIG_KERNEL_GZIP=y/# CONFIG_KERNEL_GZIP is not set/' \
+            -e 's/# CONFIG_KERNEL_ZSTD is not set/CONFIG_KERNEL_ZSTD=y/' \
+            -e 's/CONFIG_MODULE_COMPRESS_GZIP=y/# CONFIG_MODULE_COMPRESS_GZIP is not set/' \
+            -e 's/# CONFIG_MODULE_COMPRESS_ZSTD is not set/CONFIG_MODULE_COMPRESS_ZSTD=y/' \
+            .config
+          echo "CONFIG_RD_ZSTD=y" >> .config
 
-  pgo-bolt-final:
-    needs: setup-build
-    runs-on: ubuntu-latest
-    env:
-      PAR: ${{ needs.setup-build.outputs.parallel }}
-      QEMU: ${{ needs.setup-build.outputs.maxqemu }}
-      BOLT: ${{ needs.setup-build.outputs.boltthreads }}
-      XZ: ${{ needs.setup-build.outputs.xzthreads }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: CypherNoodle/linux-Sw1-011
-          path: ${{ env.KSRC }}
-          fetch-depth: 0
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: base
-          path: ${{ env.KSRC }}
-
-      - name: Preparar Initramfs
-        working-directory: ${{ env.KSRC }}
-        run: |
-          mkdir -p prof prof2 afdo afdo2
-          cp arch/x86/boot/bzImage bz
-          cat << EOF > init-script.sh
-          #!/bin/sh
-          mount -t proc proc /proc
-          mount -t sysfs sys /sys
-          echo "Carga de trabajo kernel..."
-          dd if=/dev/zero of=/dev/null bs=1M count=1024
-          i=0; while [ \$i -lt 1000 ]; do echo \$i >/dev/null; i=\$((i+1)); done
-          poweroff
-          EOF
-          chmod +x init-script.sh
-          echo init-script.sh | cpio -o -H newc > initramfs.cpio
-
-      - name: PGO + AutoFDO Rondas 1 y 2
-        working-directory: ${{ env.KSRC }}
-        run: |
-          for R in 1 2; do
-            PROF_DIR=prof${R:-}
-            AFDO_DIR=afdo${R:-}
-            mkdir -p $PROF_DIR $AFDO_DIR
-            for i in $(seq 1 $QEMU); do
-              sudo perf record -o $PROF_DIR/p$i.data -e cycles:u \
-                qemu-system-x86_64 -kernel bz -initrd initramfs.cpio -append "console=ttyS0 quiet" \
-                -nographic -m 1024M -no-reboot >/dev/null 2>&1 &
-              PID=$!; sleep $QEMU_PROFILE_TIME && sudo kill $PID || true
-              perf script -i $PROF_DIR/p$i.data > $PROF_DIR/o$i || true
-            done
-            cat $PROF_DIR/o* > $PROF_DIR/all || true
-            [ -s $PROF_DIR/all ] && create_llvm_prof --binary=vmlinux --pgo-data=$PROF_DIR/all --output=$AFDO_DIR/kernel.afdo
+          # Quitar debug pesado
+          for opt in DEBUG_KERNEL KASAN KCOV PROFILING FRAME_POINTER COMPILE_TEST; do
+            sed -i "s/CONFIG_${opt}=y/# CONFIG_${opt} is not set/" .config
           done
 
-      - name: Build Final Kernel + BOLT
+          make olddefconfig
+
+      # -----------------------------------------------
+      # Compilación Kernel
+      # -----------------------------------------------
+      - name: Build Kernel
+        working-directory: ${{ env.KSRC }}
+        env:
+          CC: "sccache clang-${{ env.LLVM_VERSION }}"
+          HOSTCC: "clang-${{ env.LLVM_VERSION }}"
+          HOSTCXX: "clang++-${{ env.LLVM_VERSION }}"
+          LD: "ld.lld-${{ env.LLVM_VERSION }}"
+          CFLAGS_KERNEL: -O3 -march=x86-64-v2 -funroll-loops -fstrict-aliasing
+          KCFLAGS: -O3 -march=x86-64-v2 -funroll-loops -fstrict-aliasing
+          LLVM: 1
+        run: |
+          make -j${{ steps.calc.outputs.p }} bindeb-pkg LOCALVERSION="-${{ github.run_number }}-opt"
+
+      # -----------------------------------------------
+      # SHA256 + Changelog
+      # -----------------------------------------------
+      - name: SHA256 + CHANGELOG
         working-directory: ${{ env.KSRC }}
         run: |
-          AFDO=afdo2/kernel.afdo
-          [ -f "$AFDO" ] && export CFLAGS_KERNEL="-flto=thin -fauto-profile-use=$AFDO" || export CFLAGS_KERNEL="-flto=thin"
-          export CC="clang-${LLVM_VERSION}"
-          export HOSTCC="clang-${LLVM_VERSION}"
-          export HOSTCXX="clang++-${LLVM_VERSION}"
-          export LD=lld
-          make -j$PAR -s vmlinux bzImage modules
-
-          # Aplicar BOLT
-          cat prof2/o* > prof2/all || true
-          if [ -s prof2/all ]; then
-            llvm-bolt-${LLVM_VERSION} vmlinux -o vmlinux.bolt \
-              -reorder-blocks=ext-tsp -reorder-functions=hfsort \
-              -split-functions -icf=1 -dyno-trace=prof2/all -threads=$BOLT
-            [ -s vmlinux.bolt ] && mv vmlinux.bolt vmlinux
-          fi
-
-      - name: Build .deb y Release
-        working-directory: ${{ env.KSRC }}
-        run: |
-          rm -rf ../debout; mkdir -p ../debout
-          export DEB_COMPRESSOR_OPTIONS="-T$XZ"
-          make -j$PAR -s bindeb-pkg LOCALVERSION="-${{ github.run_number }}-opt"
+          rm -rf ../debout
+          mkdir -p ../debout
           mv ../*.deb ../debout/
+
           cd ../debout
           sha256sum *.deb > SHA256SUMS.txt
-          PREV=$(git describe --tags --abbrev=0 --match "v*" HEAD^ 2>/dev/null || echo "")
-          if [ -n "$PREV" ]; then git log "$PREV"..HEAD --pretty=format:"%h - %s" > ../CHANGELOG.txt; else git log --reverse --max-count=50 --pretty=format:"%h - %s" > ../CHANGELOG.txt; fi
 
+          PREV=$(git describe --tags --abbrev=0 --match "v*" 2>/dev/null || echo "")
+          if [ -n "$PREV" ]; then
+            git log "$PREV"..HEAD --pretty=format:"%h - %s" > CHANGELOG.txt
+          else
+            git log --reverse --max-count=30 --pretty=format:"%h - %s" > CHANGELOG.txt
+          fi
+
+      # -----------------------------------------------
+      # Publicar release
+      # -----------------------------------------------
       - name: Publicar Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
             debout/*.deb
             debout/SHA256SUMS.txt
-            ../CHANGELOG.txt
+            debout/CHANGELOG.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
