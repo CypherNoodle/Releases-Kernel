@@ -7,29 +7,33 @@ on:
 
 env:
   SCCACHE_DIR: ${{ github.workspace }}/.sccache
-  KSRC: kernel-src
+  KSRC: ${{ github.workspace }}/kernel-src
   LLVM_VERSION: 19
 
 jobs:
   build-kernel:
     runs-on: ubuntu-latest
+
     steps:
       # ----------------------------------------------------
-      # CHECKOUT DEL KERNEL (USARÁ TU .config EXACTO)
+      # CHECKOUT DEL KERNEL (USARÁ TU .config SIN MODIFICAR)
       # ----------------------------------------------------
       - name: Checkout kernel repo
         uses: actions/checkout@v4
         with:
           repository: CypherNoodle/linux-Sw1-011
-          path: ${{ env.KSRC }}
+          path: kernel-src
           fetch-depth: 0
 
-      # Debug: comprobar que el .config se usa sin modificar
+      # Debug inicial .config
       - name: Mostrar .config real (debug)
+        working-directory: ${{ github.workspace }}/kernel-src
         run: |
           echo "===== .config REAL DEL REPO ====="
-          ls -l ${{ env.KSRC }}/.config
-          head -n 20 ${{ env.KSRC }}/.config || true
+          ls -l .config
+          head -n 20 .config
+          md5sum .config > ../config_pre.md5
+          echo "MD5 inicial guardado."
 
       # ----------------------------------------------------
       # NPROC
@@ -71,16 +75,16 @@ jobs:
           echo "${{ github.workspace }}/.sccache" >> $GITHUB_PATH
 
       # ----------------------------------------------------
-      # IMPORTANTE: NO TOCAMOS .config
+      # IMPORTANTE: NO TOCAR .config
       # ----------------------------------------------------
       - name: Confirmar que NO se regenera .config
         working-directory: ${{ env.KSRC }}
         run: |
-          echo "No se hará oldconfig ni olddefconfig."
-          echo "Se usará tu .config EXACTO."
+          echo "No se ejecutará oldconfig ni olddefconfig."
+          echo "Se usará tu .config EXACTO del repositorio."
 
       # ----------------------------------------------------
-      # COMPILACIÓN (ThinLTO + ZSTD mediante flags)
+      # COMPILACIÓN (ThinLTO + Flags sin modificar .config)
       # ----------------------------------------------------
       - name: Build Kernel
         working-directory: ${{ env.KSRC }}
@@ -98,6 +102,24 @@ jobs:
             LTO=thin \
             KBUILD_BUILD_TIMESTAMP="" \
             bindeb-pkg LOCALVERSION="-${{ github.run_number }}-opt"
+
+      # ----------------------------------------------------
+      # VERIFICAR QUE .config NO FUE ALTERADO
+      # ----------------------------------------------------
+      - name: Comparar MD5 del .config antes y después
+        working-directory: ${{ env.KSRC }}
+        run: |
+          echo "MD5 actual:"
+          md5sum .config
+          md5sum .config > ../config_post.md5
+
+          echo "Comparando..."
+          if diff ../config_pre.md5 ../config_post.md5; then
+            echo "OK: El .config NO cambió."
+          else
+            echo "ERROR: El .config fue modificado!"
+            exit 1
+          fi
 
       # ----------------------------------------------------
       # SHA256 + CHANGELOG
