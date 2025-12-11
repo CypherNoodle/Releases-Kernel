@@ -84,7 +84,7 @@ jobs:
         run: |
           mkdir -p $BUILD_DIR
           make olddefconfig
-          make -j$(nproc) -s CC=gcc bindeb-pkg
+          make -j$(nproc) -s CC=clang-${LLVM_VERSION} bindeb-pkg
 
       # ------------------------------
       # 6) Collect .deb + SHA256SUMS + CHANGELOG
