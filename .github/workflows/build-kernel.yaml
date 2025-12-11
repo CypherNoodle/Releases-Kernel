@@ -7,14 +7,12 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ------------------------------------------------------------
-  # 0. Prepare environment (install dependencies + cache apt)
-  # ------------------------------------------------------------
-  setup:
+  build:
     runs-on: ubuntu-latest
-    outputs:
-      kernel_version: ${{ steps.detect_version.outputs.KERNEL_VERSION }}
     steps:
+      # ------------------------------------------------------------
+      # Checkout kernel source
+      # ------------------------------------------------------------
       - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
@@ -22,6 +20,9 @@ jobs:
           path: kernel-src
           fetch-depth: 0
 
+      # ------------------------------------------------------------
+      # Detect kernel version
+      # ------------------------------------------------------------
       - name: Detect Kernel Version
         id: detect_version
         working-directory: kernel-src
@@ -34,45 +35,30 @@ jobs:
             END {print v "." p "." s e}
           ' Makefile)
           echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
-          echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_OUTPUT
 
-      - name: Cache apt packages
-        uses: actions/cache@v4
-        with:
-          path: /var/cache/apt/archives
-          key: apt-${{ runner.os }}-v1
-
+      # ------------------------------------------------------------
+      # Install build dependencies
+      # ------------------------------------------------------------
       - name: Install build dependencies
         run: |
           sudo apt update
           sudo apt install -y \
             build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
             libncurses-dev fakeroot dpkg-dev debhelper ccache
-   
+
+      # ------------------------------------------------------------
+      # Setup ccache
+      # ------------------------------------------------------------
       - name: Setup ccache
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/kernel-src/.ccache
         run: |
-          mkdir -p kernel-src/.ccache
-          export CCACHE_DIR=$(pwd)/kernel-src/.ccache
+          mkdir -p $CCACHE_DIR
           ccache -s
 
-  # ------------------------------------------------------------
-  # 1. Build kernel
-  # ------------------------------------------------------------
-  build:
-    runs-on: ubuntu-latest
-    needs: setup
-    steps:
-      - name: Checkout kernel source
-        uses: actions/checkout@v4
-        with:
-          repository: CypherNoodle/linux-Sw1-011
-          path: kernel-src
-          fetch-depth: 0
-          
-      - name: Setup ccache in build
-        run: export CCACHE_DIR=$(pwd)/kernel-src/.ccache
-       
-        # Restore caches
+      # ------------------------------------------------------------
+      # Restore kernel build cache
+      # ------------------------------------------------------------
       - name: Restore Kernel Build Cache
         uses: actions/cache@v4
         with:
@@ -85,16 +71,18 @@ jobs:
             kernel-src/scripts/basic
             kernel-src/scripts/mod
             kernel-src/scripts/kconfig
-          key: kernelcache-${{ runner.os }}-${{ hashFiles('kernel-src/Makefile','kernel-src/.config') }}
+          key: kernelcache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel-src/Makefile','kernel-src/.config') }}
           restore-keys: |
-              kernelcache-${{ runner.os }}-${{ needs.setup.outputs.kernel_version }}-
-              kernelcache-${{ runner.os }}-
-              kernelcache-
+            kernelcache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
+            kernelcache-${{ runner.os }}-
+            kernelcache-
 
-      - name: Show ccache stats
-        run: ccache -s
-
+      # ------------------------------------------------------------
+      # Build kernel .deb packages
+      # ------------------------------------------------------------
       - name: Build .deb kernel packages
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/kernel-src/.ccache
         run: |
           cd kernel-src
           make olddefconfig || make defconfig
@@ -106,16 +94,9 @@ jobs:
           make -j"$(nproc)" --output-sync=recurse bindeb-pkg V=0
           echo "::endgroup::"
 
-      - name: Collect .deb and generate SHA256SUMS
-        run: |
-          mkdir -p build
-          cp kernel-src/../*.deb build/
-          cd build
-          sha256sum *.deb > SHA256SUMS.txt
-          cd ..
-          cp CHANGELOG.txt build/
-          ls -lh build
-
+      # ------------------------------------------------------------
+      # Generate CHANGELOG
+      # ------------------------------------------------------------
       - name: Generate CHANGELOG
         run: |
           cd kernel-src
@@ -123,6 +104,22 @@ jobs:
           cd ..
           cat CHANGELOG.txt
 
+      # ------------------------------------------------------------
+      # Collect .deb and generate SHA256SUMS
+      # ------------------------------------------------------------
+      - name: Collect .deb and generate SHA256SUMS
+        run: |
+          mkdir -p build
+          cp kernel-src/../*.deb build/
+          cp CHANGELOG.txt build/
+          cd build
+          sha256sum *.deb > SHA256SUMS.txt
+          cd ..
+          ls -lh build
+
+      # ------------------------------------------------------------
+      # Upload to release
+      # ------------------------------------------------------------
       - name: Upload to release
         uses: softprops/action-gh-release@v1
         with:
