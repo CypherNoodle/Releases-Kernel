@@ -4,7 +4,8 @@ on:
   push:
     tags:
       - 'v*'
-
+  workflow_dispatch:
+      
 env:
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   SCCACHE_DIR: ${{ github.workspace }}/.sccache
@@ -83,20 +84,23 @@ jobs:
         run: |
           mkdir -p $BUILD_DIR
           make olddefconfig
-          make -j$(nproc) bindeb-pkg O=$BUILD_DIR LOCALVERSION="-${GITHUB_RUN_NUMBER}-opt"
+          make -j$(nproc) bindeb-pkg
 
       # ------------------------------
-      # 6) Collect SHA256SUMS + CHANGELOG
+      # 6) Collect .deb + SHA256SUMS + CHANGELOG
       # ------------------------------
-      - name: Collect SHA256SUMS and CHANGELOG
+      - name: Collect artifacts
         run: |
+          mkdir -p $BUILD_DIR
+          cp ../*.deb $BUILD_DIR/
           cd $BUILD_DIR
           sha256sum *.deb > SHA256SUMS.txt
           git -C ${{ github.workspace }}/kernel-src log --reverse -n 10 --pretty=format:"%h - %s (%an)" > CHANGELOG.txt
           cd ..
+          ls -lh $BUILD_DIR
 
       # ------------------------------
-      # 7) Upload to GitHub Release
+      # 7) Upload Release
       # ------------------------------
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v1
