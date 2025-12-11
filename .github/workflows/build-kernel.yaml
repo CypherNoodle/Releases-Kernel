@@ -38,15 +38,37 @@ jobs:
           echo "Detected kernel version: $KERNEL_VERSION"
 
       # ------------------------------------------------------------
+      # Cache APT packages
+      # ------------------------------------------------------------
+      - name: Cache APT packages
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-cache
+          key: apt-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-
+
+      # ------------------------------------------------------------
       # Install build dependencies
       # ------------------------------------------------------------
       - name: Install build dependencies
         run: |
+          # Restaurar cache de APT si existe
+          if [ -d ~/apt-cache ]; then
+            echo "Restoring APT cache..."
+            sudo cp -r ~/apt-cache/* /var/cache/apt/archives/ 2>/dev/null || true
+          fi
+          
           sudo apt-get update
           sudo apt-get install -y \
             build-essential bc bison flex libssl-dev libelf-dev \
             libncurses-dev fakeroot dpkg-dev debhelper \
             kmod cpio rsync ccache libdw-dev
+          
+          # Guardar paquetes descargados para cache
+          echo "Saving APT cache..."
+          mkdir -p ~/apt-cache
+          sudo cp -r /var/cache/apt/archives/*.deb ~/apt-cache/ 2>/dev/null || true
 
       # ------------------------------------------------------------
       # Setup ccache
