@@ -41,7 +41,7 @@ jobs:
           sudo ./llvm.sh ${{ env.LLVM_VERSION }}
           sudo apt update
           sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
-            libncurses-dev debhelper dwarves fakeroot dpkg-dev cpio zstd xz-utils ccache sccache \
+            libncurses-dev debhelper dwarves fakeroot dpkg-dev cpio zstd xz-utils linux-libc-dev ccache sccache \
             llvm-${{ env.LLVM_VERSION }} llvm-${{ env.LLVM_VERSION }}-tools lld-${{ env.LLVM_VERSION }}
           sudo ln -sf /usr/bin/ld.lld-${{ env.LLVM_VERSION }} /usr/bin/ld.lld
           echo "SCCACHE_DIR=${{ env.SCCACHE_DIR }}" >> $GITHUB_ENV
@@ -84,7 +84,7 @@ jobs:
         run: |
           mkdir -p $BUILD_DIR
           make olddefconfig
-          make -j$(nproc) bindeb-pkg
+          make -j$(nproc) -s CC=gcc bindeb-pkg
 
       # ------------------------------
       # 6) Collect .deb + SHA256SUMS + CHANGELOG
