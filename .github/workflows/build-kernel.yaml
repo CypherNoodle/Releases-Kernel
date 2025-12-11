@@ -48,10 +48,12 @@ jobs:
           sudo apt install -y \
             build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
             libncurses-dev fakeroot dpkg-dev debhelper ccache
-
-      - name: Setup ccache in PATH
-        shell: bash
-        run: echo "/usr/lib/ccache" >> $GITHUB_PATH
+   
+      - name: Setup ccache
+        run: |
+          mkdir -p kernel-src/.ccache
+          export CCACHE_DIR=$(pwd)/kernel-src/.ccache
+          ccache -s
 
   # ------------------------------------------------------------
   # 1. Build kernel
@@ -66,21 +68,11 @@ jobs:
           repository: CypherNoodle/linux-Sw1-011
           path: kernel-src
           fetch-depth: 0
-
-      # Restore caches
-      - name: Restore ccache
-        uses: actions/cache@v4
-        with:
-          path: kernel-src/.ccache
-          key: ccache-${{ runner.os }}-${{ needs.setup.outputs.kernel_version }}-${{ hashFiles('kernel-src/Makefile','kernel-src/.config') }}
-          restore-keys: |
-            ccache-${{ runner.os }}-${{ needs.setup.outputs.kernel_version }}-
-            ccache-${{ runner.os }}-
-            ccache-
-
-      - name: Show ccache stats
-        run: ccache -s
-
+          
+      - name: Setup ccache in build
+        run: export CCACHE_DIR=$(pwd)/kernel-src/.ccache
+       
+        # Restore caches
       - name: Restore Kernel Build Cache
         uses: actions/cache@v4
         with:
@@ -93,16 +85,20 @@ jobs:
             kernel-src/scripts/basic
             kernel-src/scripts/mod
             kernel-src/scripts/kconfig
-          key: kernelcache-${{ runner.os }}-${{ needs.setup.outputs.kernel_version }}-${{ hashFiles('kernel-src/Makefile','kernel-src/.config') }}
+          key: kernelcache-${{ runner.os }}-${{ hashFiles('kernel-src/Makefile','kernel-src/.config') }}
           restore-keys: |
-            kernelcache-${{ runner.os }}-${{ needs.setup.outputs.kernel_version }}-
-            kernelcache-${{ runner.os }}-
-            kernelcache-
+              kernelcache-${{ runner.os }}-${{ needs.setup.outputs.kernel_version }}-
+              kernelcache-${{ runner.os }}-
+              kernelcache-
+
+      - name: Show ccache stats
+        run: ccache -s
 
       - name: Build .deb kernel packages
-        working-directory: kernel-src
         run: |
+          cd kernel-src
           make olddefconfig || make defconfig
+          # Optimización GCC para x86-64-v2
           export KCFLAGS="-O2 -march=x86-64-v2 -pipe -fomit-frame-pointer -fno-strict-aliasing -falign-functions=32 -falign-loops=32 -falign-jumps=32"
           export CFLAGS_KERNEL="$KCFLAGS"
           export LDFLAGS_vmlinux="-Wl,-O1"
@@ -113,18 +109,19 @@ jobs:
       - name: Collect .deb and generate SHA256SUMS
         run: |
           mkdir -p build
-          cp ../*.deb build/
+          cp kernel-src/../*.deb build/
           cd build
           sha256sum *.deb > SHA256SUMS.txt
           cd ..
-          cp ../CHANGELOG.txt build/
+          cp CHANGELOG.txt build/
           ls -lh build
 
       - name: Generate CHANGELOG
-        working-directory: kernel-src
         run: |
-          git log --reverse -n 3 --pretty=format:"%h - %s (%an)" > ../CHANGELOG.txt
-          cat ../CHANGELOG.txt
+          cd kernel-src
+          git log --reverse -n 30 --pretty=format:"%h - %s (%an)" > ../CHANGELOG.txt
+          cd ..
+          cat CHANGELOG.txt
 
       - name: Upload to release
         uses: softprops/action-gh-release@v1
