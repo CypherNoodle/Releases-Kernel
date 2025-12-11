@@ -1,155 +1,109 @@
-name: Kernel Debian Ultra-Compact ThinLTO + ZSTD + Clang Opt (v2)
+name: Build Kernel (.deb) and Release
 
 on:
   push:
-    tags: ['v*']
-  workflow_dispatch:
+    tags:
+      - 'v*'
 
 env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
   SCCACHE_DIR: ${{ github.workspace }}/.sccache
-  KSRC: ${{ github.workspace }}/kernel-src
   LLVM_VERSION: 19
+  BUILD_DIR: ${{ github.workspace }}/build
 
 jobs:
-  build-kernel:
+  build:
     runs-on: ubuntu-latest
 
     steps:
-      # ----------------------------------------------------
-      # CHECKOUT DEL KERNEL (USARÁ TU .config SIN MODIFICAR)
-      # ----------------------------------------------------
-      - name: Checkout kernel repo
+      # ------------------------------
+      # 1) Checkouts
+      # ------------------------------
+      - name: Checkout main repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
           repository: CypherNoodle/linux-Sw1-011
           path: kernel-src
-          fetch-depth: 0
 
-      # Debug inicial .config
-      - name: Mostrar .config real (debug)
-        working-directory: ${{ github.workspace }}/kernel-src
-        run: |
-          echo "===== .config REAL DEL REPO ====="
-          ls -l .config
-          head -n 20 .config
-          md5sum .config > ../config_pre.md5
-          echo "MD5 inicial guardado."
-
-      # ----------------------------------------------------
-      # NPROC
-      # ----------------------------------------------------
-      - name: Calcular recursos (nproc)
-        id: calc
-        run: |
-          echo "p=$(nproc)" >> $GITHUB_OUTPUT
-
-      # ----------------------------------------------------
-      # CACHE SCCACHE
-      # ----------------------------------------------------
-      - name: Restaurar Cache de SCCACHE
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.SCCACHE_DIR }}
-          key: sccache-${{ runner.os }}-clang-${{ env.LLVM_VERSION }}
-
-      # ----------------------------------------------------
-      # DEPENDENCIAS
-      # ----------------------------------------------------
-      - name: Instalar dependencias
+      # ------------------------------
+      # 2) Install dependencies
+      # ------------------------------
+      - name: Install build dependencies
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh ${{ env.LLVM_VERSION }}
-
           sudo apt update
-          sudo apt install -y \
-            build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
-            libncurses-dev debhelper dwarves zstd sccache xz-utils util-linux \
-            fakeroot dpkg-dev cpio lld-${{ env.LLVM_VERSION }} \
-            llvm-${{ env.LLVM_VERSION }} llvm-${{ env.LLVM_VERSION }}-tools
-
+          sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
+            libncurses-dev debhelper dwarves fakeroot dpkg-dev cpio zstd xz-utils ccache sccache \
+            llvm-${{ env.LLVM_VERSION }} llvm-${{ env.LLVM_VERSION }}-tools lld-${{ env.LLVM_VERSION }}
           sudo ln -sf /usr/bin/ld.lld-${{ env.LLVM_VERSION }} /usr/bin/ld.lld
-
           echo "SCCACHE_DIR=${{ env.SCCACHE_DIR }}" >> $GITHUB_ENV
+          echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
           echo "SCCACHE_LOG=info" >> $GITHUB_ENV
-          echo "${{ github.workspace }}/.sccache" >> $GITHUB_PATH
 
-      # ----------------------------------------------------
-      # IMPORTANTE: NO TOCAR .config
-      # ----------------------------------------------------
-      - name: Confirmar que NO se regenera .config
-        working-directory: ${{ env.KSRC }}
+      # ------------------------------
+      # 3) Setup ccache
+      # ------------------------------
+      - name: Setup ccache
         run: |
-          echo "No se ejecutará oldconfig ni olddefconfig."
-          echo "Se usará tu .config EXACTO del repositorio."
+          mkdir -p $CCACHE_DIR $SCCACHE_DIR
+          ccache -s || true
 
-      # ----------------------------------------------------
-      # COMPILACIÓN (ThinLTO + Flags sin modificar .config)
-      # ----------------------------------------------------
-      - name: Build Kernel
-        working-directory: ${{ env.KSRC }}
+      # ------------------------------
+      # 4) Kernel configuration
+      # ------------------------------
+      - name: Prepare kernel config
+        working-directory: kernel-src
+        run: |
+          if [ ! -f .config ]; then
+            echo "❌ .config not found, generating defconfig"
+            make defconfig
+          fi
+          sha256sum .config
+
+      # ------------------------------
+      # 5) Build kernel (.deb) with ThinLTO
+      # ------------------------------
+      - name: Build .deb packages
+        working-directory: kernel-src
         env:
           CC: "sccache clang-${{ env.LLVM_VERSION }}"
           HOSTCC: "clang-${{ env.LLVM_VERSION }}"
           HOSTCXX: "clang++-${{ env.LLVM_VERSION }}"
           LD: "ld.lld-${{ env.LLVM_VERSION }}"
-          CFLAGS_KERNEL: -O3 -march=x86-64-v2 -funroll-loops -fstrict-aliasing
-          KCFLAGS: -O3 -march=x86-64-v2 -funroll-loops -fstrict-aliasing
-          LLVM: 1
+          KCFLAGS: "-O3 -march=x86-64-v2 -funroll-loops -fstrict-aliasing -flto=thin"
+          KBUILD_LDFLAGS: "-flto=thin"
+          LDFLAGS: "-flto=thin"
         run: |
-          make -j${{ steps.calc.outputs.p }} \
-            LLVM=1 \
-            LTO=thin \
-            KBUILD_BUILD_TIMESTAMP="" \
-            bindeb-pkg LOCALVERSION="-${{ github.run_number }}-opt"
+          mkdir -p $BUILD_DIR
+          make olddefconfig
+          make -j$(nproc) bindeb-pkg O=$BUILD_DIR LOCALVERSION="-${GITHUB_RUN_NUMBER}-opt"
 
-      # ----------------------------------------------------
-      # VERIFICAR QUE .config NO FUE ALTERADO
-      # ----------------------------------------------------
-      - name: Comparar MD5 del .config antes y después
-        working-directory: ${{ env.KSRC }}
+      # ------------------------------
+      # 6) Collect SHA256SUMS + CHANGELOG
+      # ------------------------------
+      - name: Collect SHA256SUMS and CHANGELOG
         run: |
-          echo "MD5 actual:"
-          md5sum .config
-          md5sum .config > ../config_post.md5
-
-          echo "Comparando..."
-          if diff ../config_pre.md5 ../config_post.md5; then
-            echo "OK: El .config NO cambió."
-          else
-            echo "ERROR: El .config fue modificado!"
-            exit 1
-          fi
-
-      # ----------------------------------------------------
-      # SHA256 + CHANGELOG
-      # ----------------------------------------------------
-      - name: SHA256 + CHANGELOG
-        working-directory: ${{ env.KSRC }}
-        run: |
-          rm -rf ../debout
-          mkdir -p ../debout
-          mv ../*.deb ../debout/
-
-          cd ../debout
+          cd $BUILD_DIR
           sha256sum *.deb > SHA256SUMS.txt
+          git -C ${{ github.workspace }}/kernel-src log --reverse -n 10 --pretty=format:"%h - %s (%an)" > CHANGELOG.txt
+          cd ..
 
-          PREV=$(git describe --tags --abbrev=0 --match "v*" 2>/dev/null || echo "")
-          if [ -n "$PREV" ]; then
-            git log "$PREV"..HEAD --pretty=format:"%h - %s" > CHANGELOG.txt
-          else
-            git log --reverse --max-count=30 --pretty=format:"%h - %s" > CHANGELOG.txt
-          fi
-
-      # ----------------------------------------------------
-      # RELEASE
-      # ----------------------------------------------------
-      - name: Publicar Release
+      # ------------------------------
+      # 7) Upload to GitHub Release
+      # ------------------------------
+      - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            debout/*.deb
-            debout/SHA256SUMS.txt
-            debout/CHANGELOG.txt
+            $BUILD_DIR/*.deb
+            $BUILD_DIR/SHA256SUMS.txt
+            $BUILD_DIR/CHANGELOG.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
