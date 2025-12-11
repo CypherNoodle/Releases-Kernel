@@ -1,113 +1,137 @@
-name: Build Kernel (.deb) and Release
+name: Build Kernel (.deb) and Upload Release
 
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
-      
-env:
-  CCACHE_DIR: ${{ github.workspace }}/.ccache
-  SCCACHE_DIR: ${{ github.workspace }}/.sccache
-  LLVM_VERSION: 19
-  BUILD_DIR: ${{ github.workspace }}/build
 
 jobs:
-  build:
+  # ------------------------------------------------------------
+  # 0. Prepare environment (install dependencies + cache apt)
+  # ------------------------------------------------------------
+  setup:
     runs-on: ubuntu-latest
-
+    outputs:
+      kernel_version: ${{ steps.detect_version.outputs.KERNEL_VERSION }}
     steps:
-      # ------------------------------
-      # 1) Checkouts
-      # ------------------------------
-      - name: Checkout main repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
           repository: CypherNoodle/linux-Sw1-011
           path: kernel-src
+          fetch-depth: 0
 
-      # ------------------------------
-      # 2) Install dependencies
-      # ------------------------------
+      - name: Detect Kernel Version
+        id: detect_version
+        working-directory: kernel-src
+        run: |
+          KERNEL_VERSION=$(awk '
+            /^VERSION = /      {v=$3}
+            /^PATCHLEVEL = /   {p=$3}
+            /^SUBLEVEL = /     {s=$3}
+            /^EXTRAVERSION = / {e=$3}
+            END {print v "." p "." s e}
+          ' Makefile)
+          echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
+          echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-${{ runner.os }}-v1
+
       - name: Install build dependencies
         run: |
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh ${{ env.LLVM_VERSION }}
           sudo apt update
-          sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
-            libncurses-dev debhelper dwarves fakeroot dpkg-dev cpio zstd xz-utils linux-libc-dev ccache sccache \
-            llvm-${{ env.LLVM_VERSION }} llvm-${{ env.LLVM_VERSION }}-tools lld-${{ env.LLVM_VERSION }}
-          sudo ln -sf /usr/bin/ld.lld-${{ env.LLVM_VERSION }} /usr/bin/ld.lld
-          echo "SCCACHE_DIR=${{ env.SCCACHE_DIR }}" >> $GITHUB_ENV
-          echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
-          echo "SCCACHE_LOG=info" >> $GITHUB_ENV
+          sudo apt install -y \
+            build-essential bc bison flex libssl-dev libelf-dev libdw-dev \
+            libncurses-dev fakeroot dpkg-dev debhelper ccache
 
-      # ------------------------------
-      # 3) Setup ccache
-      # ------------------------------
-      - name: Setup ccache
-        run: |
-          mkdir -p $CCACHE_DIR $SCCACHE_DIR
-          ccache -s || true
+      - name: Setup ccache in PATH
+        shell: bash
+        run: echo "/usr/lib/ccache" >> $GITHUB_PATH
 
-      # ------------------------------
-      # 4) Kernel configuration
-      # ------------------------------
-      - name: Prepare kernel config
+  # ------------------------------------------------------------
+  # 1. Build kernel
+  # ------------------------------------------------------------
+  build:
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: CypherNoodle/linux-Sw1-011
+          path: kernel-src
+          fetch-depth: 0
+
+      # Restore caches
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: kernel-src/.ccache
+          key: ccache-${{ runner.os }}-${{ needs.setup.outputs.kernel_version }}-${{ hashFiles('kernel-src/Makefile','kernel-src/.config') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ needs.setup.outputs.kernel_version }}-
+            ccache-${{ runner.os }}-
+            ccache-
+
+      - name: Show ccache stats
+        run: ccache -s
+
+      - name: Restore Kernel Build Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            kernel-src/.tmp_versions
+            kernel-src/Module.symvers
+            kernel-src/modules.order
+            kernel-src/include/generated
+            kernel-src/arch/x86/include/generated
+            kernel-src/scripts/basic
+            kernel-src/scripts/mod
+            kernel-src/scripts/kconfig
+          key: kernelcache-${{ runner.os }}-${{ needs.setup.outputs.kernel_version }}-${{ hashFiles('kernel-src/Makefile','kernel-src/.config') }}
+          restore-keys: |
+            kernelcache-${{ runner.os }}-${{ needs.setup.outputs.kernel_version }}-
+            kernelcache-${{ runner.os }}-
+            kernelcache-
+
+      - name: Build .deb kernel packages
         working-directory: kernel-src
         run: |
-          if [ ! -f .config ]; then
-            echo "❌ .config not found, generating defconfig"
-            make defconfig
-          fi
-          sha256sum .config
+          make olddefconfig || make defconfig
+          export KCFLAGS="-O2 -march=x86-64-v2 -pipe -fomit-frame-pointer -fno-strict-aliasing -falign-functions=32 -falign-loops=32 -falign-jumps=32"
+          export CFLAGS_KERNEL="$KCFLAGS"
+          export LDFLAGS_vmlinux="-Wl,-O1"
+          echo "::group::Kernel Build Logs"
+          make -j"$(nproc)" --output-sync=recurse bindeb-pkg V=0
+          echo "::endgroup::"
 
-      # ------------------------------
-      # 5) Build kernel (.deb) with ThinLTO
-      # ------------------------------
-      - name: Build .deb packages
-        working-directory: kernel-src
-        env:
-          CC: "sccache clang-${{ env.LLVM_VERSION }}"
-          HOSTCC: "clang-${{ env.LLVM_VERSION }}"
-          HOSTCXX: "clang++-${{ env.LLVM_VERSION }}"
-          LD: "ld.lld-${{ env.LLVM_VERSION }}"
-          KCFLAGS: "-O3 -march=x86-64-v2 -funroll-loops -fstrict-aliasing -flto=thin"
-          KBUILD_LDFLAGS: "-flto=thin"
-          LDFLAGS: "-flto=thin"
+      - name: Collect .deb and generate SHA256SUMS
         run: |
-          mkdir -p $BUILD_DIR
-          make olddefconfig
-          make -j$(nproc) -s CC=clang-${LLVM_VERSION} bindeb-pkg
-
-      # ------------------------------
-      # 6) Collect .deb + SHA256SUMS + CHANGELOG
-      # ------------------------------
-      - name: Collect artifacts
-        run: |
-          mkdir -p $BUILD_DIR
-          cp ../*.deb $BUILD_DIR/
-          cd $BUILD_DIR
+          mkdir -p build
+          cp ../*.deb build/
+          cd build
           sha256sum *.deb > SHA256SUMS.txt
-          git -C ${{ github.workspace }}/kernel-src log --reverse -n 10 --pretty=format:"%h - %s (%an)" > CHANGELOG.txt
           cd ..
-          ls -lh $BUILD_DIR
+          cp ../CHANGELOG.txt build/
+          ls -lh build
 
-      # ------------------------------
-      # 7) Upload Release
-      # ------------------------------
-      - name: Upload to GitHub Release
+      - name: Generate CHANGELOG
+        working-directory: kernel-src
+        run: |
+          git log --reverse -n 3 --pretty=format:"%h - %s (%an)" > ../CHANGELOG.txt
+          cat ../CHANGELOG.txt
+
+      - name: Upload to release
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            $BUILD_DIR/*.deb
-            $BUILD_DIR/SHA256SUMS.txt
-            $BUILD_DIR/CHANGELOG.txt
+            build/*.deb
+            build/SHA256SUMS.txt
+            build/CHANGELOG.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
