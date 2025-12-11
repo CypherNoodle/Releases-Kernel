@@ -68,7 +68,7 @@ jobs:
           
           sudo apt-get update
           sudo apt-get install -y \
-            bc libssl-dev libelf-dev libncurses-dev \
+            build-essential bc libssl-dev libelf-dev libncurses-dev \
             debhelper kmod cpio ccache libdw-dev
           
           echo "Saving APT cache..."
