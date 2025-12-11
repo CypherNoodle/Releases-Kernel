@@ -36,24 +36,31 @@ jobs:
           ' Makefile)
           echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
           echo "Detected kernel version: $KERNEL_VERSION"
+          
+          # Generar hash del .config para caché más preciso
+          if [ -f .config ]; then
+            CONFIG_HASH=$(sha256sum .config | cut -d' ' -f1 | cut -c1-8)
+          else
+            CONFIG_HASH="default"
+          fi
+          echo "CONFIG_HASH=$CONFIG_HASH" >> $GITHUB_ENV
 
       # ------------------------------------------------------------
-      # Cache APT packages
+      # Cache de dependencias APT
       # ------------------------------------------------------------
       - name: Cache APT packages
         uses: actions/cache@v4
         with:
           path: ~/apt-cache
-          key: apt-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
+          key: apt-${{ runner.os }}-v2-${{ hashFiles('.github/workflows/*.yml') }}
           restore-keys: |
-            apt-${{ runner.os }}-
+            apt-${{ runner.os }}-v2-
 
       # ------------------------------------------------------------
       # Install build dependencies
       # ------------------------------------------------------------
       - name: Install build dependencies
         run: |
-          # Restaurar cache de APT si existe
           if [ -d ~/apt-cache ]; then
             echo "Restoring APT cache..."
             sudo cp -r ~/apt-cache/* /var/cache/apt/archives/ 2>/dev/null || true
@@ -61,57 +68,116 @@ jobs:
           
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential bc bison flex libssl-dev libelf-dev \
-            libncurses-dev fakeroot dpkg-dev debhelper \
-            kmod cpio rsync ccache libdw-dev
+            bc libssl-dev libelf-dev libncurses-dev \
+            debhelper kmod cpio ccache libdw-dev
           
-          # Guardar paquetes descargados para cache
           echo "Saving APT cache..."
           mkdir -p ~/apt-cache
           sudo cp -r /var/cache/apt/archives/*.deb ~/apt-cache/ 2>/dev/null || true
 
       # ------------------------------------------------------------
-      # Setup ccache
+      # Cache de ccache (compilación incremental)
       # ------------------------------------------------------------
       - name: Setup ccache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.sha }}
+          key: ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ env.CONFIG_HASH }}-${{ github.sha }}
           restore-keys: |
+            ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ env.CONFIG_HASH }}-
             ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
             ccache-${{ runner.os }}-
+
+      # ------------------------------------------------------------
+      # Cache de objetos del kernel (.o files)
+      # Este es el caché más importante para builds incrementales
+      # ------------------------------------------------------------
+      - name: Cache kernel build objects
+        uses: actions/cache@v4
+        with:
+          path: |
+            kernel-src/.config
+            kernel-src/include/config/
+            kernel-src/include/generated/
+            kernel-src/arch/*/include/generated/
+            kernel-src/scripts/
+            kernel-src/.cache.mk
+            kernel-src/Module.symvers
+          key: kernel-obj-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ env.CONFIG_HASH }}-${{ hashFiles('kernel-src/Makefile', 'kernel-src/Kconfig') }}
+          restore-keys: |
+            kernel-obj-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ env.CONFIG_HASH }}-
+            kernel-obj-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
+            kernel-obj-${{ runner.os }}-
+
+      # ------------------------------------------------------------
+      # Cache de herramientas compiladas (scripts/basic, etc)
+      # ------------------------------------------------------------
+      - name: Cache kernel build tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            kernel-src/scripts/basic/
+            kernel-src/scripts/kconfig/
+            kernel-src/scripts/mod/
+            kernel-src/tools/objtool/
+          key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel-src/scripts/**/*.c') }}
+          restore-keys: |
+            kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
+            kernel-tools-${{ runner.os }}-
 
       # ------------------------------------------------------------
       # Configure ccache
       # ------------------------------------------------------------
       - name: Configure ccache
         run: |
-          ccache --max-size=2G
+          ccache --max-size=5G
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=6
           ccache --zero-stats
+          echo "Ccache configuration:"
+          ccache --show-config | grep -E "max_size|compression"
+
+      # ------------------------------------------------------------
+      # Restore kernel build state
+      # ------------------------------------------------------------
+      - name: Restore kernel build state
+        working-directory: kernel-src
+        run: |
+          echo "Checking cached build state..."
+          if [ -f .config ]; then
+            echo "Found cached .config"
+            make olddefconfig
+          else
+            echo "No cached config, creating default..."
+            make defconfig
+          fi
+          
+          # Verificar si hay archivos de compilación previa
+          if [ -f Module.symvers ]; then
+            echo "Found cached Module.symvers"
+          fi
+          
+          if [ -d include/generated ]; then
+            echo "Found cached generated headers"
+          fi
 
       # ------------------------------------------------------------
       # Build kernel .deb packages
       # ------------------------------------------------------------
       - name: Build .deb kernel packages
+        working-directory: kernel-src
         run: |
-          cd kernel-src
-          
-          # Verificar si existe .config, si no crear uno
-          if [ ! -f .config ]; then
-            echo "No .config found, creating default config..."
-            make defconfig
-          else
-            echo ".config found, updating..."
-            make olddefconfig
-          fi
-          
           # Optimización GCC para x86-64-v2
           export KCFLAGS="-O2 -march=x86-64-v2 -pipe"
           export PATH="/usr/lib/ccache:$PATH"
+          export CCACHE_DIR="$HOME/.ccache"
           
-          echo "Starting kernel build..."
-          make -j$(nproc) bindeb-pkg 2>&1 | tee build.log
+          echo "Starting kernel build with cached objects..."
+          echo "Available cores: $(nproc)"
+          
+          # Usar más jobs para aprovechar el caché
+          # -s silencia la salida para evitar saturar el I/O con stdout
+          make -s -j$(($(nproc) * 2)) bindeb-pkg 2>&1 | tee build.log
           
           echo "Build completed, checking for .deb files..."
           ls -lh ../*.deb || echo "No .deb files found in parent directory"
@@ -120,7 +186,24 @@ jobs:
       # Show ccache statistics
       # ------------------------------------------------------------
       - name: Show ccache stats
-        run: ccache --show-stats
+        run: |
+          echo "=== Ccache Statistics ==="
+          ccache --show-stats
+          echo ""
+          echo "Cache hit rate can significantly speed up builds!"
+
+      # ------------------------------------------------------------
+      # Save build metrics
+      # ------------------------------------------------------------
+      - name: Save build metrics
+        if: always()
+        run: |
+          echo "=== Build Metrics ===" > build-metrics.txt
+          echo "Build Date: $(date)" >> build-metrics.txt
+          echo "Kernel Version: ${{ env.KERNEL_VERSION }}" >> build-metrics.txt
+          echo "Config Hash: ${{ env.CONFIG_HASH }}" >> build-metrics.txt
+          echo "" >> build-metrics.txt
+          ccache --show-stats >> build-metrics.txt
 
       # ------------------------------------------------------------
       # Generate CHANGELOG
@@ -145,7 +228,6 @@ jobs:
         run: |
           mkdir -p release
           
-          # Los .deb se generan en el directorio padre de kernel-src
           if ls *.deb 1> /dev/null 2>&1; then
             cp *.deb release/
           else
@@ -154,6 +236,7 @@ jobs:
           fi
           
           cp CHANGELOG.txt release/
+          [ -f build-metrics.txt ] && cp build-metrics.txt release/
           
           cd release
           sha256sum *.deb > SHA256SUMS.txt
@@ -168,11 +251,12 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: kernel-packages
+          name: kernel-packages-${{ env.KERNEL_VERSION }}
           path: |
             release/*.deb
             release/SHA256SUMS.txt
             release/CHANGELOG.txt
+            release/build-metrics.txt
             kernel-src/build.log
 
       # ------------------------------------------------------------
@@ -186,6 +270,7 @@ jobs:
             release/*.deb
             release/SHA256SUMS.txt
             release/CHANGELOG.txt
+            release/build-metrics.txt
           draft: false
           prerelease: false
         env:
