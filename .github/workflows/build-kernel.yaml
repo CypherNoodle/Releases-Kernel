@@ -167,13 +167,23 @@ jobs:
       - name: Build .deb kernel packages
         working-directory: kernel-src
         run: |
-          # Optimización GCC para x86-64-v2
-          export KCFLAGS="-O2 -march=x86-64-v2 -pipe"
+          # Optimizaciones GCC avanzadas para Intel x5-Z8300 (Airmont/Silvermont)
+          # -march=silvermont: Genera código para arquitectura Silvermont
+          # -mtune=silvermont: Optimiza scheduling para Silvermont
+          # -O2: Balance óptimo entre rendimiento y tamaño
+          # -pipe: Usa pipes en lugar de archivos temporales (más rápido)
+          # -fno-plt: Elimina PLT para llamadas más rápidas
+          # -fomit-frame-pointer: Libera un registro extra (seguro en x86-64)
+          # -fstack-protector-strong: Seguridad sin impacto significativo
+          export KCFLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -fno-plt -fomit-frame-pointer"
+          export KCPPFLAGS="-D_FORTIFY_SOURCE=2"
+          export LDFLAGS="-Wl,-O1,--sort-common,--as-needed,-z,relro,-z,now"
           export PATH="/usr/lib/ccache:$PATH"
           export CCACHE_DIR="$HOME/.ccache"
           
           echo "Starting kernel build with cached objects..."
           echo "Available cores: $(nproc)"
+          echo "Optimizations: Silvermont (Intel x5-Z8300) + Advanced GCC flags"
           
           # Usar más jobs para aprovechar el caché
           # -s silencia la salida para evitar saturar el I/O con stdout
@@ -258,7 +268,7 @@ jobs:
             release/CHANGELOG.txt
             release/build-metrics.txt
             kernel-src/build.log
-
+            
       # ------------------------------------------------------------
       # Upload to release (only on tag push)
       # ------------------------------------------------------------
