@@ -175,7 +175,7 @@ jobs:
           # -fno-plt: Elimina PLT para llamadas más rápidas
           # -fomit-frame-pointer: Libera un registro extra (seguro en x86-64)
           # -fstack-protector-strong: Seguridad sin impacto significativo
-          export KCFLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -fno-plt"
+          export KCFLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -mprefer-vector-width=128 -fstack-protector-strong"
           export KCPPFLAGS="-D_FORTIFY_SOURCE=2"
           export LDFLAGS="-Wl,-O1,--sort-common,--as-needed,-z,relro,-z,now"
           export PATH="/usr/lib/ccache:$PATH"
