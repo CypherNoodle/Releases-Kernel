@@ -35,15 +35,21 @@ jobs:
             END {print v "." p "." s e}
           ' Makefile)
           echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
+          echo "version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
           echo "Detected kernel version: $KERNEL_VERSION"
           
-          # Generar hash del .config para caché más preciso
+          # Hash del .config para caché más preciso
           if [ -f .config ]; then
             CONFIG_HASH=$(sha256sum .config | cut -d' ' -f1 | cut -c1-8)
           else
-            CONFIG_HASH="default"
+            CONFIG_HASH="noconfig"
           fi
           echo "CONFIG_HASH=$CONFIG_HASH" >> $GITHUB_ENV
+          echo "config_hash=$CONFIG_HASH" >> $GITHUB_OUTPUT
+          
+          # Hash de los archivos fuente más importantes para cache key
+          SOURCE_HASH=$(find . -name "*.c" -o -name "*.h" | sort | xargs sha256sum | sha256sum | cut -d' ' -f1 | cut -c1-8)
+          echo "SOURCE_HASH=$SOURCE_HASH" >> $GITHUB_ENV
 
       # ------------------------------------------------------------
       # Cache de dependencias APT
@@ -52,9 +58,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/apt-cache
-          key: apt-${{ runner.os }}-v2-${{ hashFiles('.github/workflows/*.yml') }}
+          key: apt-${{ runner.os }}-v3
           restore-keys: |
-            apt-${{ runner.os }}-v2-
+            apt-${{ runner.os }}-
 
       # ------------------------------------------------------------
       # Install build dependencies
@@ -77,22 +83,22 @@ jobs:
 
       # ------------------------------------------------------------
       # Cache de ccache (compilación incremental)
+      # CLAVE: Removemos github.sha para que sea reutilizable entre builds
       # ------------------------------------------------------------
       - name: Setup ccache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ env.CONFIG_HASH }}-${{ github.sha }}
+          key: ccache-${{ runner.os }}-${{ steps.detect_version.outputs.version }}-${{ steps.detect_version.outputs.config_hash }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ env.CONFIG_HASH }}-
-            ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
+            ccache-${{ runner.os }}-${{ steps.detect_version.outputs.version }}-
             ccache-${{ runner.os }}-
 
       # ------------------------------------------------------------
-      # Cache de objetos del kernel (.o files)
-      # Este es el caché más importante para builds incrementales
+      # Cache de metadatos del kernel (NO archivos .o)
+      # Los .o se manejan via ccache que SÍ detecta cambios
       # ------------------------------------------------------------
-      - name: Cache kernel build objects
+      - name: Cache kernel build metadata
         uses: actions/cache@v4
         with:
           path: |
@@ -103,11 +109,11 @@ jobs:
             kernel-src/scripts/
             kernel-src/.cache.mk
             kernel-src/Module.symvers
-          key: kernel-obj-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ env.CONFIG_HASH }}-${{ hashFiles('kernel-src/Makefile', 'kernel-src/Kconfig') }}
+            kernel-src/.version
+          key: kernel-meta-${{ runner.os }}-${{ steps.detect_version.outputs.version }}-${{ steps.detect_version.outputs.config_hash }}-v3
           restore-keys: |
-            kernel-obj-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ env.CONFIG_HASH }}-
-            kernel-obj-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
-            kernel-obj-${{ runner.os }}-
+            kernel-meta-${{ runner.os }}-${{ steps.detect_version.outputs.version }}-${{ steps.detect_version.outputs.config_hash }}-
+            kernel-meta-${{ runner.os }}-${{ steps.detect_version.outputs.version }}-
 
       # ------------------------------------------------------------
       # Cache de herramientas compiladas (scripts/basic, etc)
@@ -120,7 +126,7 @@ jobs:
             kernel-src/scripts/kconfig/
             kernel-src/scripts/mod/
             kernel-src/tools/objtool/
-          key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ hashFiles('kernel-src/scripts/**/*.c') }}
+          key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}-v2
           restore-keys: |
             kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
             kernel-tools-${{ runner.os }}-
@@ -133,9 +139,10 @@ jobs:
           ccache --max-size=5G
           ccache --set-config=compression=true
           ccache --set-config=compression_level=6
+          ccache --set-config=sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime
           ccache --zero-stats
-          echo "Ccache configuration:"
-          ccache --show-config | grep -E "max_size|compression"
+          echo "Ccache initial stats:"
+          ccache --show-stats
 
       # ------------------------------------------------------------
       # Restore kernel build state
@@ -144,21 +151,37 @@ jobs:
         working-directory: kernel-src
         run: |
           echo "Checking cached build state..."
+          
+          # Verificar archivos cacheados
           if [ -f .config ]; then
-            echo "Found cached .config"
+            echo "✓ Found cached .config"
             make olddefconfig
           else
-            echo "No cached config, creating default..."
+            echo "✗ No cached config, creating default..."
             make defconfig
           fi
           
-          # Verificar si hay archivos de compilación previa
           if [ -f Module.symvers ]; then
-            echo "Found cached Module.symvers"
+            echo "✓ Found cached Module.symvers"
+          else
+            echo "✗ No cached Module.symvers"
           fi
           
           if [ -d include/generated ]; then
-            echo "Found cached generated headers"
+            echo "✓ Found cached generated headers"
+            ls -la include/generated/ | head -10
+          else
+            echo "✗ No cached generated headers"
+          fi
+          
+          # Contar archivos .o cacheados
+          OBJ_COUNT=$(find . -name "*.o" 2>/dev/null | wc -l)
+          echo "✓ Found $OBJ_COUNT cached object files"
+          
+          if [ $OBJ_COUNT -gt 0 ]; then
+            echo "🎯 Cache restoration successful! Build should be much faster."
+          else
+            echo "⚠️  No cached objects found. This will be a full build."
           fi
 
       # ------------------------------------------------------------
@@ -167,30 +190,31 @@ jobs:
       - name: Build .deb kernel packages
         working-directory: kernel-src
         run: |
-          # Optimizaciones GCC avanzadas para Intel x5-Z8300 (Airmont/Silvermont)
-          # -march=silvermont: Genera código para arquitectura Silvermont
-          # -mtune=silvermont: Optimiza scheduling para Silvermont
-          # -O2: Balance óptimo entre rendimiento y tamaño
-          # -pipe: Usa pipes en lugar de archivos temporales (más rápido)
-          # -fno-plt: Elimina PLT para llamadas más rápidas
-          # -fomit-frame-pointer: Libera un registro extra (seguro en x86-64)
-          # -fstack-protector-strong: Seguridad sin impacto significativo
+          # Optimizaciones GCC para Intel x5-Z8300
           export KCFLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -mprefer-vector-width=128 -fstack-protector-strong"
           export KCPPFLAGS="-D_FORTIFY_SOURCE=2"
           export LDFLAGS="-Wl,-O1,--sort-common,--as-needed,-z,relro,-z,now"
           export PATH="/usr/lib/ccache:$PATH"
           export CCACHE_DIR="$HOME/.ccache"
           
-          echo "Starting kernel build with cached objects..."
+          echo "Starting kernel build..."
           echo "Available cores: $(nproc)"
-          echo "Optimizations: Silvermont (Intel x5-Z8300) + Advanced GCC flags"
+          echo "Optimizations: Silvermont (Intel x5-Z8300)"
           
-          # Usar más jobs para aprovechar el caché
-          # -s silencia la salida para evitar saturar el I/O con stdout
-          make -s -j$(($(nproc) * 2)) bindeb-pkg 2>&1 | tee build.log
+          # Timestamp de inicio
+          START_TIME=$(date +%s)
           
-          echo "Build completed, checking for .deb files..."
-          ls -lh ../*.deb || echo "No .deb files found in parent directory"
+          # Build con más verbosidad para debug
+          make -j$(($(nproc) * 2)) bindeb-pkg 2>&1 | tee build.log
+          
+          # Calcular tiempo de build
+          END_TIME=$(date +%s)
+          BUILD_TIME=$((END_TIME - START_TIME))
+          echo "Build completed in $BUILD_TIME seconds"
+          echo "BUILD_TIME=$BUILD_TIME" >> $GITHUB_ENV
+          
+          echo "Checking for .deb files..."
+          ls -lh ../*.deb || echo "No .deb files found"
 
       # ------------------------------------------------------------
       # Show ccache statistics
@@ -200,7 +224,24 @@ jobs:
           echo "=== Ccache Statistics ==="
           ccache --show-stats
           echo ""
-          echo "Cache hit rate can significantly speed up builds!"
+          
+          # Calcular hit rate
+          STATS=$(ccache --show-stats)
+          HITS=$(echo "$STATS" | grep "Hits:" | head -1 | awk '{print $2}')
+          TOTAL=$(echo "$STATS" | grep "Cacheable calls:" | awk '{print $2}')
+          
+          if [ ! -z "$HITS" ] && [ ! -z "$TOTAL" ]; then
+            HIT_RATE=$(echo "scale=2; ($HITS / $TOTAL) * 100" | bc)
+            echo "📊 Cache hit rate: ${HIT_RATE}%"
+            
+            if (( $(echo "$HIT_RATE > 50" | bc -l) )); then
+              echo "✅ Excellent cache performance!"
+            elif (( $(echo "$HIT_RATE > 20" | bc -l) )); then
+              echo "⚠️  Moderate cache usage"
+            else
+              echo "❌ Low cache usage - this might be a fresh build"
+            fi
+          fi
 
       # ------------------------------------------------------------
       # Save build metrics
@@ -212,7 +253,9 @@ jobs:
           echo "Build Date: $(date)" >> build-metrics.txt
           echo "Kernel Version: ${{ env.KERNEL_VERSION }}" >> build-metrics.txt
           echo "Config Hash: ${{ env.CONFIG_HASH }}" >> build-metrics.txt
+          echo "Build Time: ${{ env.BUILD_TIME }} seconds" >> build-metrics.txt
           echo "" >> build-metrics.txt
+          echo "=== Ccache Statistics ===" >> build-metrics.txt
           ccache --show-stats >> build-metrics.txt
 
       # ------------------------------------------------------------
@@ -225,6 +268,7 @@ jobs:
           echo "" >> ../CHANGELOG.txt
           echo "Build Date: $(date)" >> ../CHANGELOG.txt
           echo "Kernel Version: ${{ env.KERNEL_VERSION }}" >> ../CHANGELOG.txt
+          echo "Build Time: ${{ env.BUILD_TIME }} seconds" >> ../CHANGELOG.txt
           echo "" >> ../CHANGELOG.txt
           echo "## Recent Changes (Last 30 commits):" >> ../CHANGELOG.txt
           git log --reverse -n 30 --pretty=format:"- %h - %s (%an)" >> ../CHANGELOG.txt || echo "No git history available" >> ../CHANGELOG.txt
