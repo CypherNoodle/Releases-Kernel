@@ -37,30 +37,19 @@ jobs:
           echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
           echo "version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
           echo "Detected kernel version: $KERNEL_VERSION"
-          
-          # Hash del .config para caché más preciso
-          if [ -f .config ]; then
-            CONFIG_HASH=$(sha256sum .config | cut -d' ' -f1 | cut -c1-8)
-          else
-            CONFIG_HASH="noconfig"
-          fi
-          echo "CONFIG_HASH=$CONFIG_HASH" >> $GITHUB_ENV
-          echo "config_hash=$CONFIG_HASH" >> $GITHUB_OUTPUT
-          
-          # Hash de los archivos fuente más importantes para cache key
-          SOURCE_HASH=$(find . -name "*.c" -o -name "*.h" | sort | xargs sha256sum | sha256sum | cut -d' ' -f1 | cut -c1-8)
-          echo "SOURCE_HASH=$SOURCE_HASH" >> $GITHUB_ENV
 
       # ------------------------------------------------------------
       # Cache de dependencias APT
       # ------------------------------------------------------------
-      - name: Cache APT packages
-        uses: actions/cache@v4
+      - name: Restore APT cache
+        uses: actions/cache/restore@v4
+        id: apt-restore
         with:
           path: ~/apt-cache
           key: apt-${{ runner.os }}-v3
           restore-keys: |
             apt-${{ runner.os }}-
+            apt-
 
       # ------------------------------------------------------------
       # Install build dependencies
@@ -82,54 +71,130 @@ jobs:
           sudo cp -r /var/cache/apt/archives/*.deb ~/apt-cache/ 2>/dev/null || true
 
       # ------------------------------------------------------------
-      # Cache de ccache (compilación incremental)
-      # CLAVE: Removemos github.sha para que sea reutilizable entre builds
+      # Save APT cache
       # ------------------------------------------------------------
-      - name: Setup ccache
-        uses: actions/cache@v4
+      - name: Save APT cache
+        uses: actions/cache/save@v4
+        if: always() && steps.apt-restore.outputs.cache-hit != 'true'
         with:
-          path: ~/.ccache
-          key: ccache-${{ runner.os }}-${{ steps.detect_version.outputs.version }}-${{ steps.detect_version.outputs.config_hash }}
-          restore-keys: |
-            ccache-${{ runner.os }}-${{ steps.detect_version.outputs.version }}-
-            ccache-${{ runner.os }}-
+          path: ~/apt-cache
+          key: ${{ steps.apt-restore.outputs.cache-primary-key }}
 
       # ------------------------------------------------------------
-      # Cache de metadatos del kernel (NO archivos .o)
-      # Los .o se manejan via ccache que SÍ detecta cambios
+      # Restore ccache - BUSCA EN TODOS LOS BRANCHES/TAGS
       # ------------------------------------------------------------
-      - name: Cache kernel build metadata
-        uses: actions/cache@v4
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        id: ccache-restore
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
+            ccache-${{ runner.os }}-6.19.
+            ccache-${{ runner.os }}-6.
+            ccache-${{ runner.os }}-
+            ccache-
+
+      # ------------------------------------------------------------
+      # Restore kernel metadata
+      # ------------------------------------------------------------
+      - name: Restore kernel metadata
+        uses: actions/cache/restore@v4
+        id: kernel-meta-restore
         with:
           path: |
             kernel-src/.config
             kernel-src/include/config/
             kernel-src/include/generated/
             kernel-src/arch/*/include/generated/
-            kernel-src/scripts/
-            kernel-src/.cache.mk
             kernel-src/Module.symvers
             kernel-src/.version
-          key: kernel-meta-${{ runner.os }}-${{ steps.detect_version.outputs.version }}-${{ steps.detect_version.outputs.config_hash }}-v3
+          key: kernel-meta-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
           restore-keys: |
-            kernel-meta-${{ runner.os }}-${{ steps.detect_version.outputs.version }}-${{ steps.detect_version.outputs.config_hash }}-
-            kernel-meta-${{ runner.os }}-${{ steps.detect_version.outputs.version }}-
+            kernel-meta-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
+            kernel-meta-${{ runner.os }}-6.19.
+            kernel-meta-${{ runner.os }}-6.
+            kernel-meta-${{ runner.os }}-
+            kernel-meta-
 
       # ------------------------------------------------------------
-      # Cache de herramientas compiladas (scripts/basic, etc)
+      # Restore kernel build tools
       # ------------------------------------------------------------
-      - name: Cache kernel build tools
-        uses: actions/cache@v4
+      - name: Restore kernel build tools
+        uses: actions/cache/restore@v4
+        id: kernel-tools-restore
         with:
           path: |
             kernel-src/scripts/basic/
             kernel-src/scripts/kconfig/
             kernel-src/scripts/mod/
             kernel-src/tools/objtool/
-          key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}-v2
+          key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
           restore-keys: |
             kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
+            kernel-tools-${{ runner.os }}-6.19.
+            kernel-tools-${{ runner.os }}-6.
             kernel-tools-${{ runner.os }}-
+            kernel-tools-
+
+      # ------------------------------------------------------------
+      # VERIFICAR RESTAURACIÓN DE CACHE
+      # ------------------------------------------------------------
+      - name: Check cache restoration
+        run: |
+          echo "=========================================="
+          echo "CACHE RESTORATION STATUS"
+          echo "=========================================="
+          echo "Build: #${{ github.run_number }}"
+          echo "Ref: ${{ github.ref }}"
+          echo "Tag: ${{ github.ref_name }}"
+          echo ""
+          
+          # ccache
+          echo "1️⃣  CCACHE:"
+          if [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ]; then
+            echo "   ✅ RESTORED from: ${{ steps.ccache-restore.outputs.cache-matched-key }}"
+            if [ -d ~/.ccache ]; then
+              SIZE=$(du -sh ~/.ccache 2>/dev/null | cut -f1)
+              FILES=$(find ~/.ccache -type f 2>/dev/null | wc -l)
+              echo "   📦 Size: $SIZE"
+              echo "   📄 Files: $FILES"
+            fi
+          else
+            echo "   ❌ NOT FOUND - This will be a FULL BUILD (~50 min)"
+          fi
+          echo ""
+          
+          # kernel metadata
+          echo "2️⃣  KERNEL METADATA:"
+          if [ -n "${{ steps.kernel-meta-restore.outputs.cache-matched-key }}" ]; then
+            echo "   ✅ RESTORED from: ${{ steps.kernel-meta-restore.outputs.cache-matched-key }}"
+            [ -f kernel-src/.config ] && echo "   ✓ .config available"
+            [ -f kernel-src/Module.symvers ] && echo "   ✓ Module.symvers available"
+            [ -d kernel-src/include/generated ] && echo "   ✓ Generated headers available"
+          else
+            echo "   ❌ NOT FOUND"
+          fi
+          echo ""
+          
+          # kernel tools
+          echo "3️⃣  KERNEL BUILD TOOLS:"
+          if [ -n "${{ steps.kernel-tools-restore.outputs.cache-matched-key }}" ]; then
+            echo "   ✅ RESTORED from: ${{ steps.kernel-tools-restore.outputs.cache-matched-key }}"
+            [ -x kernel-src/scripts/basic/fixdep ] && echo "   ✓ Compiled tools available"
+          else
+            echo "   ❌ NOT FOUND"
+          fi
+          echo ""
+          
+          # Predicción de tiempo de build
+          if [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ]; then
+            echo "⚡ CACHE HIT! Build should take ~10-20 minutes"
+          else
+            echo "⏰ NO CACHE - Build will take ~50-60 minutes"
+          fi
+          echo "=========================================="
 
       # ------------------------------------------------------------
       # Configure ccache
@@ -140,48 +205,25 @@ jobs:
           ccache --set-config=compression=true
           ccache --set-config=compression_level=6
           ccache --set-config=sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime
-          ccache --zero-stats
-          echo "Ccache initial stats:"
+          
+          echo "=== Ccache Configuration ==="
+          ccache --show-config | grep -E "(max_size|compression|sloppiness)"
+          echo ""
+          echo "=== Initial Statistics ==="
           ccache --show-stats
 
       # ------------------------------------------------------------
       # Restore kernel build state
       # ------------------------------------------------------------
-      - name: Restore kernel build state
+      - name: Prepare kernel configuration
         working-directory: kernel-src
         run: |
-          echo "Checking cached build state..."
-          
-          # Verificar archivos cacheados
           if [ -f .config ]; then
-            echo "✓ Found cached .config"
+            echo "✅ Using cached .config"
             make olddefconfig
           else
-            echo "✗ No cached config, creating default..."
+            echo "⚠️  Creating new default config"
             make defconfig
-          fi
-          
-          if [ -f Module.symvers ]; then
-            echo "✓ Found cached Module.symvers"
-          else
-            echo "✗ No cached Module.symvers"
-          fi
-          
-          if [ -d include/generated ]; then
-            echo "✓ Found cached generated headers"
-            ls -la include/generated/ | head -10
-          else
-            echo "✗ No cached generated headers"
-          fi
-          
-          # Contar archivos .o cacheados
-          OBJ_COUNT=$(find . -name "*.o" 2>/dev/null | wc -l)
-          echo "✓ Found $OBJ_COUNT cached object files"
-          
-          if [ $OBJ_COUNT -gt 0 ]; then
-            echo "🎯 Cache restoration successful! Build should be much faster."
-          else
-            echo "⚠️  No cached objects found. This will be a full build."
           fi
 
       # ------------------------------------------------------------
@@ -190,58 +232,128 @@ jobs:
       - name: Build .deb kernel packages
         working-directory: kernel-src
         run: |
-          # Optimizaciones GCC para Intel x5-Z8300
-          export KCFLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -mprefer-vector-width=128 -fstack-protector-strong"
-          export KCPPFLAGS="-D_FORTIFY_SOURCE=2"
-          export LDFLAGS="-Wl,-O1,--sort-common,--as-needed,-z,relro,-z,now"
+          # Setup ccache
           export PATH="/usr/lib/ccache:$PATH"
           export CCACHE_DIR="$HOME/.ccache"
+          export CC="ccache gcc"
           
-          echo "Starting kernel build..."
-          echo "Available cores: $(nproc)"
-          echo "Optimizations: Silvermont (Intel x5-Z8300)"
+          # Optimizations
+          export KCFLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -mprefer-vector-width=128"
+          export KCPPFLAGS="-D_FORTIFY_SOURCE=2"
           
-          # Timestamp de inicio
+          echo "=== Build Configuration ==="
+          echo "Compiler: $(gcc --version | head -1)"
+          echo "Ccache: $(ccache --version | head -1)"
+          echo "Cores: $(nproc)"
+          echo "Target: Intel x5-Z8300 (Silvermont)"
+          echo ""
+          
           START_TIME=$(date +%s)
           
-          # Build con más verbosidad para debug
-          make -j$(($(nproc) * 2)) bindeb-pkg 2>&1 | tee build.log
+          echo "=== Starting Kernel Build ==="
+          make -s -j$(nproc) bindeb-pkg 2>&1 | tee build.log
           
-          # Calcular tiempo de build
           END_TIME=$(date +%s)
           BUILD_TIME=$((END_TIME - START_TIME))
-          echo "Build completed in $BUILD_TIME seconds"
+          BUILD_MIN=$((BUILD_TIME / 60))
+          BUILD_SEC=$((BUILD_TIME % 60))
+          
+          echo ""
+          echo "=========================================="
+          echo "BUILD COMPLETED!"
+          echo "Time: ${BUILD_MIN} minutes ${BUILD_SEC} seconds"
+          echo "=========================================="
           echo "BUILD_TIME=$BUILD_TIME" >> $GITHUB_ENV
           
-          echo "Checking for .deb files..."
-          ls -lh ../*.deb || echo "No .deb files found"
+          ls -lh ../*.deb
 
       # ------------------------------------------------------------
       # Show ccache statistics
       # ------------------------------------------------------------
-      - name: Show ccache stats
+      - name: Show ccache statistics
+        if: always()
         run: |
-          echo "=== Ccache Statistics ==="
+          echo "=========================================="
+          echo "CCACHE FINAL STATISTICS"
+          echo "=========================================="
           ccache --show-stats
           echo ""
           
-          # Calcular hit rate
+          # Parse stats
           STATS=$(ccache --show-stats)
-          HITS=$(echo "$STATS" | grep "Hits:" | head -1 | awk '{print $2}')
-          TOTAL=$(echo "$STATS" | grep "Cacheable calls:" | awk '{print $2}')
+          DIRECT=$(echo "$STATS" | grep -i "direct" | grep -i "hit" | grep -oE '[0-9]+' | head -1 || echo "0")
+          PREPROC=$(echo "$STATS" | grep -i "preprocessed" | grep -i "hit" | grep -oE '[0-9]+' | head -1 || echo "0")
+          MISS=$(echo "$STATS" | grep -i "miss" | head -1 | grep -oE '[0-9]+' | head -1 || echo "0")
           
-          if [ ! -z "$HITS" ] && [ ! -z "$TOTAL" ]; then
-            HIT_RATE=$(echo "scale=2; ($HITS / $TOTAL) * 100" | bc)
-            echo "📊 Cache hit rate: ${HIT_RATE}%"
+          TOTAL_HITS=$((DIRECT + PREPROC))
+          TOTAL=$((TOTAL_HITS + MISS))
+          
+          echo "📊 Compilation Statistics:"
+          echo "   Direct cache hits: $DIRECT"
+          echo "   Preprocessed hits: $PREPROC"
+          echo "   Cache misses: $MISS"
+          echo "   Total compilations: $TOTAL"
+          
+          if [ $TOTAL -gt 0 ]; then
+            HIT_RATE=$(awk "BEGIN {printf \"%.1f\", ($TOTAL_HITS * 100) / $TOTAL}")
+            echo "   Cache hit rate: ${HIT_RATE}%"
+            echo ""
             
-            if (( $(echo "$HIT_RATE > 50" | bc -l) )); then
-              echo "✅ Excellent cache performance!"
+            if (( $(echo "$HIT_RATE > 80" | bc -l) )); then
+              echo "🎉 EXCELLENT! Cache provided massive speed improvement!"
+            elif (( $(echo "$HIT_RATE > 50" | bc -l) )); then
+              echo "✅ GOOD cache performance. Build was notably faster."
             elif (( $(echo "$HIT_RATE > 20" | bc -l) )); then
-              echo "⚠️  Moderate cache usage"
+              echo "⚠️  MODERATE cache usage. Some speedup achieved."
             else
-              echo "❌ Low cache usage - this might be a fresh build"
+              echo "❌ LOW cache usage. Most files were recompiled."
             fi
           fi
+          
+          FINAL_SIZE=$(du -sh ~/.ccache 2>/dev/null | cut -f1 || echo "unknown")
+          echo ""
+          echo "💾 Final cache size: $FINAL_SIZE"
+          echo "=========================================="
+
+      # ------------------------------------------------------------
+      # Save ccache
+      # ------------------------------------------------------------
+      - name: Save ccache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
+
+      # ------------------------------------------------------------
+      # Save kernel metadata
+      # ------------------------------------------------------------
+      - name: Save kernel metadata
+        uses: actions/cache/save@v4
+        if: always() && steps.kernel-meta-restore.outputs.cache-hit != 'true'
+        with:
+          path: |
+            kernel-src/.config
+            kernel-src/include/config/
+            kernel-src/include/generated/
+            kernel-src/arch/*/include/generated/
+            kernel-src/Module.symvers
+            kernel-src/.version
+          key: kernel-meta-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
+
+      # ------------------------------------------------------------
+      # Save kernel build tools
+      # ------------------------------------------------------------
+      - name: Save kernel build tools
+        uses: actions/cache/save@v4
+        if: always() && steps.kernel-tools-restore.outputs.cache-hit != 'true'
+        with:
+          path: |
+            kernel-src/scripts/basic/
+            kernel-src/scripts/kconfig/
+            kernel-src/scripts/mod/
+            kernel-src/tools/objtool/
+          key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
 
       # ------------------------------------------------------------
       # Save build metrics
@@ -249,14 +361,25 @@ jobs:
       - name: Save build metrics
         if: always()
         run: |
-          echo "=== Build Metrics ===" > build-metrics.txt
-          echo "Build Date: $(date)" >> build-metrics.txt
-          echo "Kernel Version: ${{ env.KERNEL_VERSION }}" >> build-metrics.txt
-          echo "Config Hash: ${{ env.CONFIG_HASH }}" >> build-metrics.txt
-          echo "Build Time: ${{ env.BUILD_TIME }} seconds" >> build-metrics.txt
-          echo "" >> build-metrics.txt
-          echo "=== Ccache Statistics ===" >> build-metrics.txt
-          ccache --show-stats >> build-metrics.txt
+          {
+            echo "=========================================="
+            echo "BUILD METRICS"
+            echo "=========================================="
+            echo "Date: $(date)"
+            echo "Kernel Version: ${{ env.KERNEL_VERSION }}"
+            echo "Build Number: #${{ github.run_number }}"
+            echo "Git Ref: ${{ github.ref }}"
+            echo "Build Time: ${{ env.BUILD_TIME }} seconds ($((${{ env.BUILD_TIME }} / 60))m $((${{ env.BUILD_TIME }} % 60))s)"
+            echo ""
+            echo "=== Cache Information ==="
+            echo "ccache restored from: ${{ steps.ccache-restore.outputs.cache-matched-key }}"
+            echo "metadata restored from: ${{ steps.kernel-meta-restore.outputs.cache-matched-key }}"
+            echo "tools restored from: ${{ steps.kernel-tools-restore.outputs.cache-matched-key }}"
+            echo ""
+            echo "=== Ccache Statistics ==="
+            ccache --show-stats
+            echo "=========================================="
+          } > build-metrics.txt
 
       # ------------------------------------------------------------
       # Generate CHANGELOG
@@ -264,59 +387,66 @@ jobs:
       - name: Generate CHANGELOG
         run: |
           cd kernel-src
-          echo "# Kernel Build Changelog" > ../CHANGELOG.txt
-          echo "" >> ../CHANGELOG.txt
-          echo "Build Date: $(date)" >> ../CHANGELOG.txt
-          echo "Kernel Version: ${{ env.KERNEL_VERSION }}" >> ../CHANGELOG.txt
-          echo "Build Time: ${{ env.BUILD_TIME }} seconds" >> ../CHANGELOG.txt
-          echo "" >> ../CHANGELOG.txt
-          echo "## Recent Changes (Last 30 commits):" >> ../CHANGELOG.txt
-          git log --reverse -n 30 --pretty=format:"- %h - %s (%an)" >> ../CHANGELOG.txt || echo "No git history available" >> ../CHANGELOG.txt
-          cd ..
-          cat CHANGELOG.txt
+          {
+            echo "# Kernel Build Changelog"
+            echo ""
+            echo "**Build Date:** $(date)"
+            echo "**Kernel Version:** ${{ env.KERNEL_VERSION }}"
+            echo "**Build Time:** $((${{ env.BUILD_TIME }} / 60)) minutes $((${{ env.BUILD_TIME }} % 60)) seconds"
+            echo ""
+            echo "## Recent Changes (Last 30 commits)"
+            echo ""
+            git log --reverse -n 30 --pretty=format:"- \`%h\` %s (%an)" || echo "No git history available"
+          } > ../CHANGELOG.txt
 
       # ------------------------------------------------------------
-      # Collect .deb and generate SHA256SUMS
+      # Collect release files
       # ------------------------------------------------------------
-      - name: Collect .deb and generate SHA256SUMS
+      - name: Collect release files
         run: |
           mkdir -p release
           
+          # Copy .deb files
           if ls *.deb 1> /dev/null 2>&1; then
             cp *.deb release/
+            echo "✅ Copied $(ls *.deb | wc -l) .deb files"
           else
-            echo "ERROR: No .deb files found!"
+            echo "❌ ERROR: No .deb files found!"
             exit 1
           fi
           
+          # Copy documentation
           cp CHANGELOG.txt release/
-          [ -f build-metrics.txt ] && cp build-metrics.txt release/
+          cp build-metrics.txt release/
           
+          # Generate checksums
           cd release
           sha256sum *.deb > SHA256SUMS.txt
-          echo "Files ready for release:"
+          
+          echo ""
+          echo "=== Release Files ==="
           ls -lh
+          echo ""
+          echo "=== Checksums ==="
           cat SHA256SUMS.txt
 
       # ------------------------------------------------------------
-      # Upload artifacts (for debugging)
+      # Upload artifacts
       # ------------------------------------------------------------
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: kernel-packages-${{ env.KERNEL_VERSION }}
+          name: kernel-packages-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
           path: |
             release/*.deb
-            release/SHA256SUMS.txt
-            release/CHANGELOG.txt
-            release/build-metrics.txt
+            release/*.txt
             kernel-src/build.log
             
       # ------------------------------------------------------------
-      # Upload to release (only on tag push)
+      # Create GitHub Release
       # ------------------------------------------------------------
-      - name: Upload to release
+      - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
@@ -325,6 +455,7 @@ jobs:
             release/SHA256SUMS.txt
             release/CHANGELOG.txt
             release/build-metrics.txt
+          body_path: release/CHANGELOG.txt
           draft: false
           prerelease: false
         env:
