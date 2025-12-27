@@ -14,7 +14,7 @@ jobs:
       # Checkout kernel source
       # ------------------------------------------------------------
       - name: Checkout kernel source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: CypherNoodle/linux-Sw1-011
           path: kernel-src
@@ -42,7 +42,7 @@ jobs:
       # Cache de dependencias APT
       # ------------------------------------------------------------
       - name: Restore APT cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         id: apt-restore
         with:
           path: ~/apt-cache
@@ -74,7 +74,7 @@ jobs:
       # Save APT cache
       # ------------------------------------------------------------
       - name: Save APT cache
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         if: always() && steps.apt-restore.outputs.cache-hit != 'true'
         with:
           path: ~/apt-cache
@@ -91,8 +91,6 @@ jobs:
           key: ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
           restore-keys: |
             ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
-            ccache-${{ runner.os }}-6.19.
-            ccache-${{ runner.os }}-6.
             ccache-${{ runner.os }}-
             ccache-
 
@@ -100,7 +98,7 @@ jobs:
       # Restore kernel metadata
       # ------------------------------------------------------------
       - name: Restore kernel metadata
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         id: kernel-meta-restore
         with:
           path: |
@@ -113,8 +111,6 @@ jobs:
           key: kernel-meta-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
           restore-keys: |
             kernel-meta-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
-            kernel-meta-${{ runner.os }}-6.19.
-            kernel-meta-${{ runner.os }}-6.
             kernel-meta-${{ runner.os }}-
             kernel-meta-
 
@@ -122,7 +118,7 @@ jobs:
       # Restore kernel build tools
       # ------------------------------------------------------------
       - name: Restore kernel build tools
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         id: kernel-tools-restore
         with:
           path: |
@@ -133,8 +129,6 @@ jobs:
           key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
           restore-keys: |
             kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
-            kernel-tools-${{ runner.os }}-6.19.
-            kernel-tools-${{ runner.os }}-6.
             kernel-tools-${{ runner.os }}-
             kernel-tools-
 
@@ -319,7 +313,7 @@ jobs:
       # Save ccache
       # ------------------------------------------------------------
       - name: Save ccache
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         if: always()
         with:
           path: ~/.ccache
@@ -329,7 +323,7 @@ jobs:
       # Save kernel metadata
       # ------------------------------------------------------------
       - name: Save kernel metadata
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         if: always() && steps.kernel-meta-restore.outputs.cache-hit != 'true'
         with:
           path: |
@@ -345,7 +339,7 @@ jobs:
       # Save kernel build tools
       # ------------------------------------------------------------
       - name: Save kernel build tools
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         if: always() && steps.kernel-tools-restore.outputs.cache-hit != 'true'
         with:
           path: |
@@ -434,7 +428,7 @@ jobs:
       # Upload artifacts
       # ------------------------------------------------------------
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: kernel-packages-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
