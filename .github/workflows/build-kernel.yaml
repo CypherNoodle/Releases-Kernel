@@ -1,14 +1,19 @@
-name: Build Kernel (.deb) and Upload Release
+name: Build Kernel and Create Release
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
+    inputs:
+      prerelease:
+        description: 'Mark as pre-release'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Necesario para crear releases
     steps:
       # ------------------------------------------------------------
       # Checkout kernel source
@@ -27,6 +32,7 @@ jobs:
         id: detect_version
         working-directory: kernel-src
         run: |
+          # Extraer versión completa
           KERNEL_VERSION=$(awk '
             /^VERSION = /      {v=$3}
             /^PATCHLEVEL = /   {p=$3}
@@ -37,19 +43,62 @@ jobs:
           echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
           echo "version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
           echo "Detected kernel version: $KERNEL_VERSION"
+          
+          # Extraer solo VERSION y PATCHLEVEL para cache keys (ej: 6.19)
+          KERNEL_MAJOR_MINOR=$(awk '
+            /^VERSION = /      {v=$3}
+            /^PATCHLEVEL = /   {p=$3}
+            END {print v "." p}
+          ' Makefile)
+          echo "KERNEL_MAJOR_MINOR=$KERNEL_MAJOR_MINOR" >> $GITHUB_ENV
+          echo "major_minor=$KERNEL_MAJOR_MINOR" >> $GITHUB_OUTPUT
+          echo "Kernel major.minor: $KERNEL_MAJOR_MINOR"
+          
+          # Extraer solo VERSION para cache keys más permisivos (ej: 6)
+          KERNEL_MAJOR=$(awk '
+            /^VERSION = /      {v=$3}
+            END {print v}
+          ' Makefile)
+          echo "KERNEL_MAJOR=$KERNEL_MAJOR" >> $GITHUB_ENV
+          echo "major=$KERNEL_MAJOR" >> $GITHUB_OUTPUT
+          echo "Kernel major: $KERNEL_MAJOR"
+          
+          # Tag para la release
+          RELEASE_TAG="v${KERNEL_VERSION}"
+          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
+          echo "tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          echo "Release will be tagged as: $RELEASE_TAG"
 
       # ------------------------------------------------------------
-      # Cache de dependencias APT
+      # Check if release already exists
+      # ------------------------------------------------------------
+      - name: Check if release exists
+        id: check_release
+        run: |
+          if gh release view "${{ env.RELEASE_TAG }}" > /dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "⚠️  Release ${{ env.RELEASE_TAG }} already exists!"
+            echo "It will be updated with new build artifacts."
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "✅ Release ${{ env.RELEASE_TAG }} will be created."
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+
+      # ------------------------------------------------------------
+      # Restore APT cache
       # ------------------------------------------------------------
       - name: Restore APT cache
         uses: actions/cache/restore@v5
         id: apt-restore
         with:
           path: ~/apt-cache
-          key: apt-${{ runner.os }}-v3
+          key: apt-${{ runner.os }}-v4-${{ github.run_number }}
           restore-keys: |
+            apt-${{ runner.os }}-v4-
             apt-${{ runner.os }}-
-            apt-
 
       # ------------------------------------------------------------
       # Install build dependencies
@@ -57,7 +106,7 @@ jobs:
       - name: Install build dependencies
         run: |
           if [ -d ~/apt-cache ]; then
-            echo "Restoring APT cache..."
+            echo "✅ Restoring APT cache..."
             sudo cp -r ~/apt-cache/* /var/cache/apt/archives/ 2>/dev/null || true
           fi
           
@@ -78,21 +127,22 @@ jobs:
         if: always() && steps.apt-restore.outputs.cache-hit != 'true'
         with:
           path: ~/apt-cache
-          key: ${{ steps.apt-restore.outputs.cache-primary-key }}
+          key: apt-${{ runner.os }}-v4-${{ github.run_number }}
 
       # ------------------------------------------------------------
-      # Restore ccache - BUSCA EN TODOS LOS BRANCHES/TAGS
+      # Restore ccache
       # ------------------------------------------------------------
       - name: Restore ccache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         id: ccache-restore
         with:
           path: ~/.ccache
           key: ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
           restore-keys: |
             ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
+            ccache-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}.
+            ccache-${{ runner.os }}-${{ env.KERNEL_MAJOR }}.
             ccache-${{ runner.os }}-
-            ccache-
 
       # ------------------------------------------------------------
       # Restore kernel metadata
@@ -111,8 +161,9 @@ jobs:
           key: kernel-meta-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
           restore-keys: |
             kernel-meta-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
+            kernel-meta-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}.
+            kernel-meta-${{ runner.os }}-${{ env.KERNEL_MAJOR }}.
             kernel-meta-${{ runner.os }}-
-            kernel-meta-
 
       # ------------------------------------------------------------
       # Restore kernel build tools
@@ -129,44 +180,46 @@ jobs:
           key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
           restore-keys: |
             kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
+            kernel-tools-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}.
+            kernel-tools-${{ runner.os }}-${{ env.KERNEL_MAJOR }}.
             kernel-tools-${{ runner.os }}-
-            kernel-tools-
 
       # ------------------------------------------------------------
-      # VERIFICAR RESTAURACIÓN DE CACHE
+      # Check cache restoration
       # ------------------------------------------------------------
       - name: Check cache restoration
         run: |
           echo "=========================================="
+          echo "BUILD INFORMATION"
+          echo "=========================================="
+          echo "Kernel Version: ${{ env.KERNEL_VERSION }}"
+          echo "Release Tag: ${{ env.RELEASE_TAG }}"
+          echo "Build Number: #${{ github.run_number }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Release Exists: ${{ steps.check_release.outputs.exists }}"
+          echo ""
+          echo "=========================================="
           echo "CACHE RESTORATION STATUS"
           echo "=========================================="
-          echo "Build: #${{ github.run_number }}"
-          echo "Ref: ${{ github.ref }}"
-          echo "Tag: ${{ github.ref_name }}"
-          echo ""
           
           # ccache
           echo "1️⃣  CCACHE:"
           if [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ]; then
-            echo "   ✅ RESTORED from: ${{ steps.ccache-restore.outputs.cache-matched-key }}"
+            echo "   ✅ RESTORED: ${{ steps.ccache-restore.outputs.cache-matched-key }}"
             if [ -d ~/.ccache ]; then
               SIZE=$(du -sh ~/.ccache 2>/dev/null | cut -f1)
               FILES=$(find ~/.ccache -type f 2>/dev/null | wc -l)
-              echo "   📦 Size: $SIZE"
-              echo "   📄 Files: $FILES"
+              echo "   📦 Size: $SIZE ($FILES files)"
             fi
           else
-            echo "   ❌ NOT FOUND - This will be a FULL BUILD (~50 min)"
+            echo "   ❌ NOT FOUND - First build will take ~50 minutes"
           fi
           echo ""
           
           # kernel metadata
           echo "2️⃣  KERNEL METADATA:"
           if [ -n "${{ steps.kernel-meta-restore.outputs.cache-matched-key }}" ]; then
-            echo "   ✅ RESTORED from: ${{ steps.kernel-meta-restore.outputs.cache-matched-key }}"
-            [ -f kernel-src/.config ] && echo "   ✓ .config available"
-            [ -f kernel-src/Module.symvers ] && echo "   ✓ Module.symvers available"
-            [ -d kernel-src/include/generated ] && echo "   ✓ Generated headers available"
+            echo "   ✅ RESTORED: ${{ steps.kernel-meta-restore.outputs.cache-matched-key }}"
           else
             echo "   ❌ NOT FOUND"
           fi
@@ -175,18 +228,18 @@ jobs:
           # kernel tools
           echo "3️⃣  KERNEL BUILD TOOLS:"
           if [ -n "${{ steps.kernel-tools-restore.outputs.cache-matched-key }}" ]; then
-            echo "   ✅ RESTORED from: ${{ steps.kernel-tools-restore.outputs.cache-matched-key }}"
-            [ -x kernel-src/scripts/basic/fixdep ] && echo "   ✓ Compiled tools available"
+            echo "   ✅ RESTORED: ${{ steps.kernel-tools-restore.outputs.cache-matched-key }}"
           else
             echo "   ❌ NOT FOUND"
           fi
           echo ""
           
-          # Predicción de tiempo de build
+          # Build time prediction
           if [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ]; then
-            echo "⚡ CACHE HIT! Build should take ~10-20 minutes"
+            echo "⚡ CACHE AVAILABLE - Build should take ~10-20 minutes"
           else
-            echo "⏰ NO CACHE - Build will take ~50-60 minutes"
+            echo "⏰ NO CACHE - Full build will take ~50-60 minutes"
+            echo "💡 Subsequent builds will be much faster!"
           fi
           echo "=========================================="
 
@@ -207,7 +260,7 @@ jobs:
           ccache --show-stats
 
       # ------------------------------------------------------------
-      # Restore kernel build state
+      # Prepare kernel configuration
       # ------------------------------------------------------------
       - name: Prepare kernel configuration
         working-directory: kernel-src
@@ -231,20 +284,24 @@ jobs:
           export CCACHE_DIR="$HOME/.ccache"
           export CC="ccache gcc"
           
-          # Optimizations
+          # Optimizations for Intel x5-Z8300
           export KCFLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -mprefer-vector-width=128"
           export KCPPFLAGS="-D_FORTIFY_SOURCE=2"
           
-          echo "=== Build Configuration ==="
+          echo "=========================================="
+          echo "BUILD CONFIGURATION"
+          echo "=========================================="
           echo "Compiler: $(gcc --version | head -1)"
           echo "Ccache: $(ccache --version | head -1)"
-          echo "Cores: $(nproc)"
-          echo "Target: Intel x5-Z8300 (Silvermont)"
+          echo "CPU Cores: $(nproc)"
+          echo "Target Platform: Intel x5-Z8300 (Silvermont)"
+          echo "Kernel Version: ${{ env.KERNEL_VERSION }}"
+          echo "=========================================="
           echo ""
           
           START_TIME=$(date +%s)
           
-          echo "=== Starting Kernel Build ==="
+          echo "🔨 Starting kernel compilation..."
           make -s -j$(nproc) bindeb-pkg 2>&1 | tee build.log
           
           END_TIME=$(date +%s)
@@ -254,11 +311,14 @@ jobs:
           
           echo ""
           echo "=========================================="
-          echo "BUILD COMPLETED!"
-          echo "Time: ${BUILD_MIN} minutes ${BUILD_SEC} seconds"
+          echo "✅ BUILD COMPLETED SUCCESSFULLY!"
+          echo "=========================================="
+          echo "Build Time: ${BUILD_MIN} minutes ${BUILD_SEC} seconds"
           echo "=========================================="
           echo "BUILD_TIME=$BUILD_TIME" >> $GITHUB_ENV
           
+          echo ""
+          echo "📦 Generated .deb packages:"
           ls -lh ../*.deb
 
       # ------------------------------------------------------------
@@ -295,12 +355,16 @@ jobs:
             
             if (( $(echo "$HIT_RATE > 80" | bc -l) )); then
               echo "🎉 EXCELLENT! Cache provided massive speed improvement!"
+              echo "   Build was ~5x faster than a clean build."
             elif (( $(echo "$HIT_RATE > 50" | bc -l) )); then
-              echo "✅ GOOD cache performance. Build was notably faster."
+              echo "✅ GOOD cache performance."
+              echo "   Build was ~3x faster than a clean build."
             elif (( $(echo "$HIT_RATE > 20" | bc -l) )); then
-              echo "⚠️  MODERATE cache usage. Some speedup achieved."
+              echo "⚠️  MODERATE cache usage."
+              echo "   Build was ~2x faster than a clean build."
             else
-              echo "❌ LOW cache usage. Most files were recompiled."
+              echo "📝 LOW cache usage - this was close to a full rebuild."
+              echo "   Next build will be much faster!"
             fi
           fi
           
@@ -359,10 +423,11 @@ jobs:
             echo "=========================================="
             echo "BUILD METRICS"
             echo "=========================================="
-            echo "Date: $(date)"
+            echo "Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
             echo "Kernel Version: ${{ env.KERNEL_VERSION }}"
             echo "Build Number: #${{ github.run_number }}"
-            echo "Git Ref: ${{ github.ref }}"
+            echo "Branch: ${{ github.ref_name }}"
+            echo "Commit: ${{ github.sha }}"
             echo "Build Time: ${{ env.BUILD_TIME }} seconds ($((${{ env.BUILD_TIME }} / 60))m $((${{ env.BUILD_TIME }} % 60))s)"
             echo ""
             echo "=== Cache Information ==="
@@ -382,16 +447,46 @@ jobs:
         run: |
           cd kernel-src
           {
-            echo "# Kernel Build Changelog"
+            echo "# Linux Kernel ${{ env.KERNEL_VERSION }} - Build Release"
             echo ""
-            echo "**Build Date:** $(date)"
-            echo "**Kernel Version:** ${{ env.KERNEL_VERSION }}"
-            echo "**Build Time:** $((${{ env.BUILD_TIME }} / 60)) minutes $((${{ env.BUILD_TIME }} % 60)) seconds"
+            echo "## Build Information"
             echo ""
-            echo "## Recent Changes (Last 30 commits)"
+            echo "- **Kernel Version:** ${{ env.KERNEL_VERSION }}"
+            echo "- **Build Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+            echo "- **Build Time:** $((${{ env.BUILD_TIME }} / 60)) minutes $((${{ env.BUILD_TIME }} % 60)) seconds"
+            echo "- **Target Platform:** Intel x5-Z8300 (Silvermont)"
+            echo "- **Compiler:** GCC with optimizations (-march=silvermont -mtune=silvermont)"
             echo ""
-            git log --reverse -n 30 --pretty=format:"- \`%h\` %s (%an)" || echo "No git history available"
-          } > ../CHANGELOG.txt
+            echo "## Installation"
+            echo ""
+            echo "\`\`\`bash"
+            echo "# Download all .deb files"
+            echo "# Install with:"
+            echo "sudo dpkg -i linux-*.deb"
+            echo ""
+            echo "# Reboot to use the new kernel"
+            echo "sudo reboot"
+            echo "\`\`\`"
+            echo ""
+            echo "## Package Contents"
+            echo ""
+            echo "- \`linux-image-*\` - Kernel image"
+            echo "- \`linux-headers-*\` - Kernel headers for module compilation"
+            echo "- \`linux-libc-dev-*\` - Kernel headers for userspace"
+            echo ""
+            echo "## Recent Kernel Changes (Last 30 commits)"
+            echo ""
+            git log --reverse -n 30 --pretty=format:"- \`%h\` %s (%an, %ar)" || echo "No git history available"
+            echo ""
+            echo ""
+            echo "## Verification"
+            echo ""
+            echo "All packages are checksummed in \`SHA256SUMS.txt\`. Verify with:"
+            echo ""
+            echo "\`\`\`bash"
+            echo "sha256sum -c SHA256SUMS.txt"
+            echo "\`\`\`"
+          } > ../CHANGELOG.md
 
       # ------------------------------------------------------------
       # Collect release files
@@ -400,57 +495,77 @@ jobs:
         run: |
           mkdir -p release
           
-          # Copy .deb files
           if ls *.deb 1> /dev/null 2>&1; then
             cp *.deb release/
-            echo "✅ Copied $(ls *.deb | wc -l) .deb files"
+            DEB_COUNT=$(ls *.deb | wc -l)
+            echo "✅ Copied $DEB_COUNT .deb package(s)"
           else
             echo "❌ ERROR: No .deb files found!"
             exit 1
           fi
           
-          # Copy documentation
-          cp CHANGELOG.txt release/
+          cp CHANGELOG.md release/
           cp build-metrics.txt release/
           
-          # Generate checksums
           cd release
           sha256sum *.deb > SHA256SUMS.txt
           
           echo ""
-          echo "=== Release Files ==="
+          echo "=========================================="
+          echo "RELEASE FILES PREPARED"
+          echo "=========================================="
           ls -lh
           echo ""
-          echo "=== Checksums ==="
+          echo "📋 Checksums:"
           cat SHA256SUMS.txt
+          echo "=========================================="
 
       # ------------------------------------------------------------
-      # Upload artifacts
+      # Upload artifacts (always, for debugging)
       # ------------------------------------------------------------
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: kernel-packages-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
+          name: kernel-${{ env.KERNEL_VERSION }}-build-${{ github.run_number }}
           path: |
             release/*.deb
             release/*.txt
+            release/*.md
             kernel-src/build.log
             
       # ------------------------------------------------------------
-      # Create GitHub Release
+      # Create or Update GitHub Release
       # ------------------------------------------------------------
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "Linux Kernel ${{ env.KERNEL_VERSION }}"
+          body_path: release/CHANGELOG.md
           files: |
             release/*.deb
             release/SHA256SUMS.txt
-            release/CHANGELOG.txt
             release/build-metrics.txt
-          body_path: release/CHANGELOG.txt
           draft: false
-          prerelease: false
+          prerelease: ${{ inputs.prerelease }}
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ------------------------------------------------------------
+      # Summary
+      # ------------------------------------------------------------
+      - name: Build summary
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "🎉 WORKFLOW COMPLETED"
+          echo "=========================================="
+          echo "Kernel Version: ${{ env.KERNEL_VERSION }}"
+          echo "Release Tag: ${{ env.RELEASE_TAG }}"
+          echo "Build Time: $((${{ env.BUILD_TIME }} / 60))m $((${{ env.BUILD_TIME }} % 60))s"
+          echo ""
+          echo "📦 Release URL:"
+          echo "https://github.com/${{ github.repository }}/releases/tag/${{ env.RELEASE_TAG }}"
+          echo "=========================================="
