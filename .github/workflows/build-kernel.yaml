@@ -8,6 +8,8 @@ on:
         required: false
         type: boolean
         default: false
+  schedule:
+    - cron: '0 0 */5 * *'  # Ejecuta automáticamente cada 5 días a las 00:00 UTC
 
 jobs:
   build:
