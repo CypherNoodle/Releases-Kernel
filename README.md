@@ -1,6 +1,10 @@
 # 🐧 Linux Kernel for Acer Switch One 10 SW1-011
 
-Custom Linux kernel builds optimized for Intel x5-Z8300 (Silvermont architecture).
+Custom Linux kernel builds optimized for Intel x5-Z8300 (Silvermont/Airmont architecture).
+
+## 📊 Build Status
+
+![Build Status](https://img.shields.io/github/actions/workflow/status/CypherNoodle/Releases-Kernel/build-kernel.yaml?branch=main&style=for-the-badge&logo=github-actions&logoColor=white)
 
 ## 🚀 Quick Start
 
@@ -113,10 +117,6 @@ To modify kernel configuration:
 2. Commit changes
 3. Run the workflow
 4. New release will use your custom config
-
-## 📊 Build Status
-
-[![Build Status](https://img.shields.io/github/actions/workflow/status/CypherNoodle/Releases-Kernel/build-kernel.yaml?branch=main&style=for-the-badge&logo=github-actions&logoColor=white)](https://github.com/CypherNoodle/Releases-Kernel/actions/workflows/build-kernel.yaml)
 
 ## 🤝 Contributing
 
