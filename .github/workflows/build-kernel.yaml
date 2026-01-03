@@ -16,6 +16,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write  # Necesario para crear releases
+    env:
+      # Configuración de compilación optimizada
+      MAKEFLAGS: "-j$(($(nproc) + 2))"
+      CCACHE_COMPRESS: "true"
+      CCACHE_COMPRESSLEVEL: "1"
+      CCACHE_MAXSIZE: "5G"
     steps:
       # ------------------------------------------------------------
       # Checkout kernel source
@@ -113,13 +119,27 @@ jobs:
           fi
           
           sudo apt-get update
+          
+          # Instalar mold (linker ultra-rápido) si está disponible
+          if apt-cache show mold >/dev/null 2>&1; then
+            echo "📦 Installing mold (fast linker)..."
+            sudo apt-get install -y mold
+          fi
+          
           sudo apt-get install -y \
             build-essential bc libssl-dev libelf-dev libncurses-dev \
-            debhelper kmod cpio ccache libdw-dev
+            debhelper kmod cpio ccache libdw-dev \
+            zstd pigz
           
           echo "Saving APT cache..."
           mkdir -p ~/apt-cache
           sudo cp -r /var/cache/apt/archives/*.deb ~/apt-cache/ 2>/dev/null || true
+          
+          echo ""
+          echo "=== System Resources ==="
+          echo "CPU cores: $(nproc)"
+          echo "Memory: $(free -h | grep Mem | awk '{print $2}')"
+          echo "Disk space: $(df -h / | tail -1 | awk '{print $4}') free"
 
       # ------------------------------------------------------------
       # Save APT cache
@@ -252,8 +272,9 @@ jobs:
         run: |
           ccache --max-size=5G
           ccache --set-config=compression=true
-          ccache --set-config=compression_level=6
-          ccache --set-config=sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime
+          ccache --set-config=compression_level=1
+          ccache --set-config=sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers
+          ccache --set-config=hash_dir=false
           
           echo "=== Ccache Configuration ==="
           ccache --show-config | grep -E "(max_size|compression|sloppiness)"
@@ -271,9 +292,23 @@ jobs:
             echo "✅ Using cached .config"
             make olddefconfig
           else
-            echo "⚠️  Creating new default config"
+            echo "⚠️  Creating optimized config for fast builds"
             make defconfig
+            
+            # Optimizaciones para builds más rápidos
+            scripts/config --disable CONFIG_DEBUG_INFO
+            scripts/config --disable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+            scripts/config --disable CONFIG_DEBUG_INFO_DWARF4
+            scripts/config --disable CONFIG_DEBUG_INFO_DWARF5
+            scripts/config --disable CONFIG_GDB_SCRIPTS
+            scripts/config --set-val CONFIG_DEBUG_INFO_NONE y
+            
+            make olddefconfig
           fi
+          
+          echo ""
+          echo "=== Configuration summary ==="
+          grep -E "CONFIG_DEBUG_INFO" .config | head -10 || true
 
       # ------------------------------------------------------------
       # Build kernel .deb packages
@@ -285,26 +320,51 @@ jobs:
           export PATH="/usr/lib/ccache:$PATH"
           export CCACHE_DIR="$HOME/.ccache"
           export CC="ccache gcc"
+          export CXX="ccache g++"
+          
+          # Usar mold si está disponible (3-5x más rápido que ld)
+          if command -v mold &> /dev/null; then
+            export LDFLAGS="-fuse-ld=mold"
+            echo "✅ Using mold linker (ultra-fast)"
+          fi
           
           # Optimizations for Intel x5-Z8300
           export KCFLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -mprefer-vector-width=128"
           export KCPPFLAGS="-D_FORTIFY_SOURCE=2"
+          
+          # Deshabilitar generación de documentación
+          export KDOC_WERROR=0
+          
+          # Configurar número óptimo de jobs
+          NCPUS=$(nproc)
+          JOBS=$((NCPUS + 2))
           
           echo "=========================================="
           echo "BUILD CONFIGURATION"
           echo "=========================================="
           echo "Compiler: $(gcc --version | head -1)"
           echo "Ccache: $(ccache --version | head -1)"
-          echo "CPU Cores: $(nproc)"
+          echo "CPU Cores: $NCPUS"
+          echo "Parallel Jobs: $JOBS"
           echo "Target Platform: Intel x5-Z8300 (Silvermont)"
           echo "Kernel Version: ${{ env.KERNEL_VERSION }}"
+          if command -v mold &> /dev/null; then
+            echo "Linker: mold (fast)"
+          else
+            echo "Linker: ld (default)"
+          fi
           echo "=========================================="
           echo ""
           
           START_TIME=$(date +%s)
           
           echo "🔨 Starting kernel compilation..."
-          make -s -j$(nproc) bindeb-pkg 2>&1 | tee build.log
+          # Build optimizado
+          make -s -j$JOBS \
+            LOCALVERSION= \
+            KDEB_COMPRESS=xz \
+            INSTALL_MOD_STRIP=1 \
+            bindeb-pkg 2>&1 | tee build.log
           
           END_TIME=$(date +%s)
           BUILD_TIME=$((END_TIME - START_TIME))
