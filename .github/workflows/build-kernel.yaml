@@ -103,9 +103,8 @@ jobs:
         id: apt-restore
         with:
           path: ~/apt-cache
-          key: apt-${{ runner.os }}-v4-${{ github.run_number }}
+          key: apt-${{ runner.os }}-v4
           restore-keys: |
-            apt-${{ runner.os }}-v4-
             apt-${{ runner.os }}-
 
       # ------------------------------------------------------------
@@ -149,7 +148,7 @@ jobs:
         if: always() && steps.apt-restore.outputs.cache-hit != 'true'
         with:
           path: ~/apt-cache
-          key: apt-${{ runner.os }}-v4-${{ github.run_number }}
+          key: apt-${{ runner.os }}-v4
 
       # ------------------------------------------------------------
       # Restore ccache
@@ -159,9 +158,8 @@ jobs:
         id: ccache-restore
         with:
           path: ~/.ccache
-          key: ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
+          key: ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
             ccache-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}.
             ccache-${{ runner.os }}-${{ env.KERNEL_MAJOR }}.
             ccache-${{ runner.os }}-
@@ -180,9 +178,8 @@ jobs:
             kernel-src/arch/*/include/generated/
             kernel-src/Module.symvers
             kernel-src/.version
-          key: kernel-meta-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
+          key: kernel-meta-${{ runner.os }}-${{ env.KERNEL_VERSION }}
           restore-keys: |
-            kernel-meta-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
             kernel-meta-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}.
             kernel-meta-${{ runner.os }}-${{ env.KERNEL_MAJOR }}.
             kernel-meta-${{ runner.os }}-
@@ -199,9 +196,8 @@ jobs:
             kernel-src/scripts/kconfig/
             kernel-src/scripts/mod/
             kernel-src/tools/objtool/
-          key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
+          key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}
           restore-keys: |
-            kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}-
             kernel-tools-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}.
             kernel-tools-${{ runner.os }}-${{ env.KERNEL_MAJOR }}.
             kernel-tools-${{ runner.os }}-
@@ -443,7 +439,7 @@ jobs:
         if: always()
         with:
           path: ~/.ccache
-          key: ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
+          key: ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}
 
       # ------------------------------------------------------------
       # Save kernel metadata
@@ -459,7 +455,7 @@ jobs:
             kernel-src/arch/*/include/generated/
             kernel-src/Module.symvers
             kernel-src/.version
-          key: kernel-meta-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
+          key: kernel-meta-${{ runner.os }}-${{ env.KERNEL_VERSION }}
 
       # ------------------------------------------------------------
       # Save kernel build tools
@@ -473,7 +469,7 @@ jobs:
             kernel-src/scripts/kconfig/
             kernel-src/scripts/mod/
             kernel-src/tools/objtool/
-          key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
+          key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}
 
       # ------------------------------------------------------------
       # Save build metrics
