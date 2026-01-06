@@ -86,10 +86,43 @@ jobs:
           if gh release view "${{ env.RELEASE_TAG }}" > /dev/null 2>&1; then
             echo "exists=true" >> $GITHUB_OUTPUT
             echo "⚠️  Release ${{ env.RELEASE_TAG }} already exists!"
-            echo "It will be updated with new build artifacts."
+            echo "Existing assets will be replaced with new build."
           else
             echo "exists=false" >> $GITHUB_OUTPUT
             echo "✅ Release ${{ env.RELEASE_TAG }} will be created."
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+
+      # ------------------------------------------------------------
+      # Delete existing release assets if release exists
+      # ------------------------------------------------------------
+      - name: Delete old release assets
+        if: steps.check_release.outputs.exists == 'true'
+        run: |
+          echo "🗑️  Deleting old assets from release ${{ env.RELEASE_TAG }}..."
+          
+          # Obtener lista de assets
+          ASSETS=$(gh release view "${{ env.RELEASE_TAG }}" --json assets --jq '.assets[].name')
+          
+          if [ -z "$ASSETS" ]; then
+            echo "No assets to delete"
+          else
+            echo "Found assets to delete:"
+            echo "$ASSETS"
+            echo ""
+            
+            # Borrar cada asset
+            echo "$ASSETS" | while IFS= read -r asset; do
+              if [ -n "$asset" ]; then
+                echo "Deleting: $asset"
+                gh release delete-asset "${{ env.RELEASE_TAG }}" "$asset" --yes || true
+              fi
+            done
+            
+            echo ""
+            echo "✅ Old assets deleted successfully"
           fi
         env:
           GH_TOKEN: ${{ github.token }}
@@ -158,9 +191,8 @@ jobs:
         id: ccache-restore
         with:
           path: ~/.ccache
-          key: ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}
+          key: ccache-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}.
             ccache-${{ runner.os }}-${{ env.KERNEL_MAJOR }}.
             ccache-${{ runner.os }}-
 
@@ -178,9 +210,8 @@ jobs:
             kernel-src/arch/*/include/generated/
             kernel-src/Module.symvers
             kernel-src/.version
-          key: kernel-meta-${{ runner.os }}-${{ env.KERNEL_VERSION }}
+          key: kernel-meta-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
           restore-keys: |
-            kernel-meta-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}.
             kernel-meta-${{ runner.os }}-${{ env.KERNEL_MAJOR }}.
             kernel-meta-${{ runner.os }}-
 
@@ -196,9 +227,8 @@ jobs:
             kernel-src/scripts/kconfig/
             kernel-src/scripts/mod/
             kernel-src/tools/objtool/
-          key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}
+          key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
           restore-keys: |
-            kernel-tools-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}.
             kernel-tools-${{ runner.os }}-${{ env.KERNEL_MAJOR }}.
             kernel-tools-${{ runner.os }}-
 
@@ -439,7 +469,7 @@ jobs:
         if: always()
         with:
           path: ~/.ccache
-          key: ccache-${{ runner.os }}-${{ env.KERNEL_VERSION }}
+          key: ccache-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
 
       # ------------------------------------------------------------
       # Save kernel metadata
@@ -455,7 +485,7 @@ jobs:
             kernel-src/arch/*/include/generated/
             kernel-src/Module.symvers
             kernel-src/.version
-          key: kernel-meta-${{ runner.os }}-${{ env.KERNEL_VERSION }}
+          key: kernel-meta-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
 
       # ------------------------------------------------------------
       # Save kernel build tools
@@ -469,7 +499,7 @@ jobs:
             kernel-src/scripts/kconfig/
             kernel-src/scripts/mod/
             kernel-src/tools/objtool/
-          key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_VERSION }}
+          key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
 
       # ------------------------------------------------------------
       # Save build metrics
