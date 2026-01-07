@@ -25,7 +25,8 @@ jobs:
         with:
           repository: CypherNoodle/linux-Sw1-011
           path: kernel-src
-          fetch-depth: 0  # Historia completa para changelog
+          fetch-depth: 50
+          filter: blob:limit=1m
 
       # ------------------------------------------------------------
       # Setup tmpfs for faster builds
@@ -421,7 +422,7 @@ jobs:
           
           echo "🔨 Starting kernel compilation..."
           # Build optimizado - deshabilitar verificaciones innecesarias
-          make -j$JOBS \
+          make -s -j$JOBS \
             KERNELRELEASE=${{ env.KERNEL_VERSION }} \
             KDEB_PKGVERSION=${{ env.KERNEL_VERSION }}-1 \
             KDEB_SOURCENAME=linux-custom \
