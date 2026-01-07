@@ -53,7 +53,7 @@ Or manually trigger the workflow:
 
 #### Performance Optimizations Applied
 
-- 🚀 **tmpfs Build Directory**: Entire build runs in RAM (4GB tmpfs) - eliminates disk I/O bottleneck
+- 🚀 **tmpfs Build Directory**: Entire build runs in RAM (6GB tmpfs) - eliminates disk I/O bottleneck
 - ⚡ **Mold Linker**: 3-5x faster linking (saves 10-15 min per build)
 - 💨 **Ccache**: Intelligent compiler cache (reuses ~85% on rebuilds)
 - 🔧 **Parallel Compilation**: Optimized job count for GitHub Actions runners
@@ -123,7 +123,7 @@ The workflow automatically:
 The build system includes several performance optimizations:
 
 #### Compilation Speed
-- **tmpfs Build**: Entire build in RAM (4GB)
+- **tmpfs Build**: Entire build in RAM (6GB)
   - Zero disk I/O latency
   - 15-20% faster than disk builds
   - Ccache temp files also in RAM
