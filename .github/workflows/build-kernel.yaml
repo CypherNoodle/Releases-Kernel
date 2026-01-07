@@ -25,7 +25,7 @@ jobs:
         with:
           repository: CypherNoodle/linux-Sw1-011
           path: kernel-src
-          fetch-depth: 0
+          fetch-depth: 0  # Historia completa para changelog
 
       # ------------------------------------------------------------
       # Setup tmpfs for faster builds
@@ -41,8 +41,14 @@ jobs:
           echo "Total RAM: ${TOTAL_RAM}GB"
           echo "Available RAM: ${AVAILABLE_RAM}GB"
           
-          # GitHub Actions runners tienen ~7-16GB de RAM
-          # Usar 6GB para tmpfs (aprovecha la RAM disponible)
+          # Verificar tamaño del código fuente
+          SOURCE_SIZE=$(du -sh --exclude=.git kernel-src | cut -f1)
+          GIT_SIZE=$(du -sh kernel-src/.git 2>/dev/null | cut -f1)
+          
+          echo "Source code size (without .git): $SOURCE_SIZE"
+          echo "Git history size: $GIT_SIZE"
+          
+          # Usar 6GB para tmpfs
           TMPFS_SIZE="6G"
           
           # Crear directorio tmpfs
@@ -53,21 +59,27 @@ jobs:
           echo "✅ tmpfs mounted at /tmp/kernel-build (${TMPFS_SIZE})"
           df -h /tmp/kernel-build
           
-          # Mover el código del kernel a tmpfs de forma más robusta
+          # Estrategia: código fuente en tmpfs, .git en disco
           echo ""
-          echo "📦 Moving kernel source to tmpfs..."
+          echo "📦 Moving kernel source to tmpfs (keeping .git on disk)..."
           
-          # Copiar todo el contenido (incluidos archivos ocultos)
-          cp -a kernel-src/. /tmp/kernel-build/
+          # Copiar solo código fuente a tmpfs (sin .git)
+          rsync -a --exclude='.git' kernel-src/ /tmp/kernel-build/
+          
+          # Guardar .git en una ubicación temporal en disco
+          mv kernel-src/.git kernel-git-backup
           
           # Eliminar directorio original
           rm -rf kernel-src
           
-          # Crear symlink
+          # Crear symlink a tmpfs
           ln -s /tmp/kernel-build kernel-src
           
           echo "✅ Kernel source now in RAM (tmpfs)"
-          echo "Files in tmpfs: $(find /tmp/kernel-build -type f | wc -l)"
+          echo "✅ Git history preserved on disk for changelog"
+          echo "Files in tmpfs: $(find /tmp/kernel-build -type f 2>/dev/null | wc -l)"
+          echo ""
+          df -h /tmp/kernel-build
 
       # ------------------------------------------------------------
       # Detect kernel version
