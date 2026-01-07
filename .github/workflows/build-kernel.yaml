@@ -25,7 +25,7 @@ jobs:
         with:
           repository: CypherNoodle/linux-Sw1-011
           path: kernel-src
-          fetch-depth: 50
+          fetch-depth: 35
           filter: blob:limit=1m
 
       # ------------------------------------------------------------
@@ -248,6 +248,18 @@ jobs:
             kernel-tools-${{ runner.os }}-
 
       # ------------------------------------------------------------
+      # Restore .config generado
+      # ------------------------------------------------------------
+      - name: Restore generated .config
+        uses: actions/cache/restore@v5
+        id: config-restore
+        with:
+          path: kernel-src/.config
+          key: config-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig') }}
+          restore-keys: |
+            config-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-
+
+      # ------------------------------------------------------------
       # Check cache restoration
       # ------------------------------------------------------------
       - name: Check cache restoration
@@ -280,8 +292,18 @@ jobs:
           fi
           echo ""
           
+          # .config
+          echo "2️⃣  KERNEL .CONFIG:"
+          if [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
+            echo "   ✅ RESTORED: Cached .config (preserves timestamps for ccache)"
+          else
+            echo "   ⚠️  WILL GENERATE: Fresh .config from defconfig"
+            echo "   ⚠️  This may invalidate some ccache entries"
+          fi
+          echo ""
+          
           # kernel tools
-          echo "2️⃣  KERNEL BUILD TOOLS:"
+          echo "3️⃣  KERNEL BUILD TOOLS:"
           if [ -n "${{ steps.kernel-tools-restore.outputs.cache-matched-key }}" ]; then
             echo "   ✅ RESTORED: ${{ steps.kernel-tools-restore.outputs.cache-matched-key }}"
           else
@@ -290,8 +312,11 @@ jobs:
           echo ""
           
           # Build time prediction
-          if [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ]; then
-            echo "⚡ CACHE AVAILABLE - Build should take ~10-20 minutes"
+          if [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ] && [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
+            echo "⚡ CACHE AVAILABLE + CONFIG CACHED - Build should take ~10-15 minutes"
+          elif [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ]; then
+            echo "⚠️  CACHE AVAILABLE but CONFIG CHANGED - Build may take ~30-40 minutes"
+            echo "💡 Next build will be faster with cached config"
           else
             echo "⏰ NO CACHE - Full build will take ~50-60 minutes"
             echo "💡 Subsequent builds will be much faster!"
@@ -314,11 +339,21 @@ jobs:
           ccache --set-config=temporary_dir=/tmp/kernel-build/ccache-tmp
           mkdir -p /tmp/kernel-build/ccache-tmp
           
+          # CRÍTICO: Limpiar stats previos para ver uso real
+          ccache --zero-stats
+          
           echo "=== Ccache Configuration ==="
           ccache --show-config | grep -E "(max_size|compression|sloppiness|temporary_dir)"
           echo ""
-          echo "=== Initial Statistics ==="
+          echo "=== Initial Statistics (zeroed) ==="
           ccache --show-stats
+          echo ""
+          echo "=== Verifying ccache is working ==="
+          export PATH="/usr/lib/ccache:$PATH"
+          export CCACHE_DIR="$HOME/.ccache"
+          which gcc
+          which g++
+          gcc --version | head -1
 
       # ------------------------------------------------------------
       # Prepare kernel configuration
@@ -328,45 +363,54 @@ jobs:
         run: |
           echo "🔧 Configuring kernel..."
           
-          # Buscar el defconfig personalizado
-          if [ -f arch/x86/configs/acer_sw1_011_defconfig ]; then
-            echo "✅ Using custom defconfig: acer_sw1_011_defconfig"
-            make acer_sw1_011_defconfig
-          elif [ -f arch/arm64/configs/acer_sw1_011_defconfig ]; then
-            echo "✅ Using custom defconfig: acer_sw1_011_defconfig (ARM64)"
-            make acer_sw1_011_defconfig
+          # Si existe .config cacheado, usarlo
+          if [ -f .config ] && [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
+            echo "✅ Using cached .config (preserves timestamps for ccache)"
+            make olddefconfig
           else
-            echo "❌ ERROR: acer_sw1_011_defconfig not found!"
-            echo "Available defconfigs in arch/x86/configs/:"
-            ls -1 arch/x86/configs/ | grep defconfig | head -10
-            exit 1
+            echo "⚙️  Generating fresh config from defconfig"
+            
+            # Buscar el defconfig personalizado
+            if [ -f arch/x86/configs/acer_sw1_011_defconfig ]; then
+              echo "✅ Using custom defconfig: acer_sw1_011_defconfig"
+              make acer_sw1_011_defconfig
+            elif [ -f arch/arm64/configs/acer_sw1_011_defconfig ]; then
+              echo "✅ Using custom defconfig: acer_sw1_011_defconfig (ARM64)"
+              make acer_sw1_011_defconfig
+            else
+              echo "❌ ERROR: acer_sw1_011_defconfig not found!"
+              echo "Available defconfigs in arch/x86/configs/:"
+              ls -1 arch/x86/configs/ | grep defconfig | head -10
+              exit 1
+            fi
+            
+            # Optimizaciones para builds más rápidos
+            echo ""
+            echo "⚙️  Applying build optimizations..."
+            
+            # Deshabilitar debug info (ahorra ~30% tiempo)
+            scripts/config --disable CONFIG_DEBUG_INFO
+            scripts/config --disable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+            scripts/config --disable CONFIG_DEBUG_INFO_DWARF4
+            scripts/config --disable CONFIG_DEBUG_INFO_DWARF5
+            scripts/config --disable CONFIG_GDB_SCRIPTS
+            scripts/config --set-val CONFIG_DEBUG_INFO_NONE y
+            
+            # Deshabilitar LOCALVERSION automático (nombres limpios)
+            scripts/config --disable CONFIG_LOCALVERSION_AUTO
+            
+            # Optimizaciones adicionales de compilación
+            scripts/config --enable CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
+            scripts/config --disable CONFIG_GCOV_KERNEL
+            scripts/config --disable CONFIG_KCOV
+            
+            make olddefconfig
           fi
-          
-          # Optimizaciones para builds más rápidos
-          echo ""
-          echo "⚙️  Applying build optimizations..."
-          
-          # Deshabilitar debug info (ahorra ~30% tiempo)
-          scripts/config --disable CONFIG_DEBUG_INFO
-          scripts/config --disable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
-          scripts/config --disable CONFIG_DEBUG_INFO_DWARF4
-          scripts/config --disable CONFIG_DEBUG_INFO_DWARF5
-          scripts/config --disable CONFIG_GDB_SCRIPTS
-          scripts/config --set-val CONFIG_DEBUG_INFO_NONE y
-          
-          # Deshabilitar LOCALVERSION automático (nombres limpios)
-          scripts/config --disable CONFIG_LOCALVERSION_AUTO
-          
-          # Optimizaciones adicionales de compilación
-          scripts/config --enable CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
-          scripts/config --disable CONFIG_GCOV_KERNEL
-          scripts/config --disable CONFIG_KCOV
-          
-          make olddefconfig
           
           echo ""
           echo "=== Configuration summary ==="
           echo "Config used: acer_sw1_011_defconfig"
+          echo "Config cached: ${{ steps.config-restore.outputs.cache-hit }}"
           echo "Debug info: disabled"
           echo "Localversion auto: disabled"
           echo "Optimization: performance"
@@ -541,6 +585,16 @@ jobs:
             kernel-src/scripts/mod/
             kernel-src/tools/objtool/
           key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
+
+      # ------------------------------------------------------------
+      # Save .config generado
+      # ------------------------------------------------------------
+      - name: Save generated .config
+        uses: actions/cache/save@v5
+        if: always() && steps.config-restore.outputs.cache-hit != 'true'
+        with:
+          path: kernel-src/.config
+          key: config-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig') }}
 
       # ------------------------------------------------------------
       # Save build metrics
