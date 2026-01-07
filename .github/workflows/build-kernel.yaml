@@ -41,9 +41,9 @@ jobs:
           echo "Total RAM: ${TOTAL_RAM}GB"
           echo "Available RAM: ${AVAILABLE_RAM}GB"
           
-          # GitHub Actions runners tienen ~7GB de RAM
-          # Usar 4GB para tmpfs (deja suficiente para el sistema)
-          TMPFS_SIZE="4G"
+          # GitHub Actions runners tienen ~7-16GB de RAM
+          # Usar 6GB para tmpfs (aprovecha la RAM disponible)
+          TMPFS_SIZE="6G"
           
           # Crear directorio tmpfs
           sudo mkdir -p /tmp/kernel-build
@@ -53,12 +53,17 @@ jobs:
           echo "✅ tmpfs mounted at /tmp/kernel-build (${TMPFS_SIZE})"
           df -h /tmp/kernel-build
           
-          # Mover el código del kernel a tmpfs
+          # Mover el código del kernel a tmpfs de forma más robusta
           echo ""
           echo "📦 Moving kernel source to tmpfs..."
-          mv kernel-src/* /tmp/kernel-build/ 2>/dev/null || true
-          mv kernel-src/.* /tmp/kernel-build/ 2>/dev/null || true
-          rmdir kernel-src
+          
+          # Copiar todo el contenido (incluidos archivos ocultos)
+          cp -a kernel-src/. /tmp/kernel-build/
+          
+          # Eliminar directorio original
+          rm -rf kernel-src
+          
+          # Crear symlink
           ln -s /tmp/kernel-build kernel-src
           
           echo "✅ Kernel source now in RAM (tmpfs)"
