@@ -18,50 +18,40 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: '0 0 */5 * *'  # Ejecuta automáticamente cada 5 días a las 00:00 UTC
+    - cron: '0 0 */5 * *'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Necesario para crear releases
+      contents: write
     steps:
-      # ------------------------------------------------------------
-      # Checkout kernel source (optimized)
-      # ------------------------------------------------------------
       - name: Checkout kernel source
         uses: actions/checkout@v6
         with:
           repository: CypherNoodle/linux-Sw1-011
           path: kernel-src
-          fetch-depth: 32  # 30 commits para changelog + 2 de margen
+          fetch-depth: 32
           filter: blob:limit=1m
 
-      # ------------------------------------------------------------
-      # Setup tmpfs for faster builds
-      # ------------------------------------------------------------
       - name: Setup tmpfs build directory
         run: |
           echo "🚀 Setting up tmpfs for faster I/O..."
           
-          # Verificar RAM disponible
           TOTAL_RAM=$(free -g | grep Mem | awk '{print $2}')
           AVAILABLE_RAM=$(free -g | grep Mem | awk '{print $7}')
           
           echo "Total RAM: ${TOTAL_RAM}GB"
           echo "Available RAM: ${AVAILABLE_RAM}GB"
           
-          # Verificar tamaño del código fuente
           SOURCE_SIZE=$(du -sh --exclude=.git kernel-src | cut -f1)
           GIT_SIZE=$(du -sh kernel-src/.git 2>/dev/null | cut -f1)
           
           echo "Source code size (without .git): $SOURCE_SIZE"
           echo "Git history size: $GIT_SIZE"
           
-          # Usar 6GB para tmpfs
           TMPFS_SIZE="6G"
           
-          # Crear directorio tmpfs
           sudo mkdir -p /tmp/kernel-build
           sudo mount -t tmpfs -o size=$TMPFS_SIZE tmpfs /tmp/kernel-build
           sudo chown -R $USER:$USER /tmp/kernel-build
@@ -69,20 +59,15 @@ jobs:
           echo "✅ tmpfs mounted at /tmp/kernel-build (${TMPFS_SIZE})"
           df -h /tmp/kernel-build
           
-          # Estrategia: código fuente en tmpfs, .git en disco
           echo ""
           echo "📦 Moving kernel source to tmpfs (keeping .git on disk)..."
           
-          # Copiar solo código fuente a tmpfs (sin .git)
           rsync -a --exclude='.git' kernel-src/ /tmp/kernel-build/
           
-          # Guardar .git en una ubicación temporal en disco
           mv kernel-src/.git kernel-git-backup
           
-          # Eliminar directorio original
           rm -rf kernel-src
           
-          # Crear symlink a tmpfs
           ln -s /tmp/kernel-build kernel-src
           
           echo "✅ Kernel source now in RAM (tmpfs)"
@@ -91,14 +76,10 @@ jobs:
           echo ""
           df -h /tmp/kernel-build
 
-      # ------------------------------------------------------------
-      # Detect kernel version
-      # ------------------------------------------------------------
       - name: Detect Kernel Version
         id: detect_version
         working-directory: kernel-src
         run: |
-          # Extraer versión completa
           KERNEL_VERSION=$(awk '
             /^VERSION = /      {v=$3}
             /^PATCHLEVEL = /   {p=$3}
@@ -110,7 +91,6 @@ jobs:
           echo "version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
           echo "Detected kernel version: $KERNEL_VERSION"
           
-          # Extraer solo VERSION y PATCHLEVEL para cache keys (ej: 6.19)
           KERNEL_MAJOR_MINOR=$(awk '
             /^VERSION = /      {v=$3}
             /^PATCHLEVEL = /   {p=$3}
@@ -120,7 +100,6 @@ jobs:
           echo "major_minor=$KERNEL_MAJOR_MINOR" >> $GITHUB_OUTPUT
           echo "Kernel major.minor: $KERNEL_MAJOR_MINOR"
           
-          # Extraer solo VERSION para cache keys más permisivos (ej: 6)
           KERNEL_MAJOR=$(awk '
             /^VERSION = /      {v=$3}
             END {print v}
@@ -129,15 +108,11 @@ jobs:
           echo "major=$KERNEL_MAJOR" >> $GITHUB_OUTPUT
           echo "Kernel major: $KERNEL_MAJOR"
           
-          # Tag para la release
           RELEASE_TAG="v${KERNEL_VERSION}"
           echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
           echo "tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
           echo "Release will be tagged as: $RELEASE_TAG"
 
-      # ------------------------------------------------------------
-      # Determine toolchain variables
-      # ------------------------------------------------------------
       - name: Determine toolchain variables
         id: toolchain
         run: |
@@ -146,7 +121,6 @@ jobs:
             TOOLCHAIN="gcc-mold"
           fi
           
-          # Determinar compilador y linker
           case "$TOOLCHAIN" in
             "gcc-mold")
               COMPILER="gcc"
@@ -172,9 +146,6 @@ jobs:
           echo "linker=$LINKER" >> $GITHUB_OUTPUT
           echo "Selected toolchain: $COMPILER + $LINKER"
 
-      # ------------------------------------------------------------
-      # Check if release already exists
-      # ------------------------------------------------------------
       - name: Check if release exists
         id: check_release
         run: |
@@ -190,15 +161,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
 
-      # ------------------------------------------------------------
-      # Delete existing release assets if release exists
-      # ------------------------------------------------------------
       - name: Delete old release assets
         if: steps.check_release.outputs.exists == 'true'
         run: |
           echo "🗑️  Deleting old assets from release ${{ env.RELEASE_TAG }}..."
           
-          # Borrar todos los assets en una operación
           gh release delete "${{ env.RELEASE_TAG }}" --yes --cleanup-tag 2>/dev/null || true
           
           echo "✅ Old release deleted, will create fresh one"
@@ -206,9 +173,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
 
-      # ------------------------------------------------------------
-      # Restore APT cache
-      # ------------------------------------------------------------
       - name: Restore APT cache
         uses: actions/cache/restore@v5
         id: apt-restore
@@ -218,9 +182,6 @@ jobs:
           restore-keys: |
             apt-${{ runner.os }}-
 
-      # ------------------------------------------------------------
-      # Install build dependencies
-      # ------------------------------------------------------------
       - name: Install build dependencies
         run: |
           if [ -d ~/apt-cache ]; then
@@ -228,10 +189,8 @@ jobs:
             sudo cp -r ~/apt-cache/* /var/cache/apt/archives/ 2>/dev/null || true
           fi
           
-          # Instalar dependencias en paralelo
           sudo apt-get update -qq
           
-          # Instalar según toolchain
           case "${{ env.COMPILER }}-${{ env.LINKER }}" in
             "gcc-mold")
               echo "📦 Installing GCC + mold..."
@@ -246,7 +205,6 @@ jobs:
               ;;
           esac
           
-          # Instalar dependencias core
           sudo apt-get install -y -qq --no-install-recommends \
             build-essential bc libssl-dev libelf-dev libncurses-dev \
             debhelper kmod cpio ccache libdw-dev \
@@ -264,9 +222,6 @@ jobs:
           echo ""
           echo "=== Toolchain Selected: ${{ env.COMPILER }} + ${{ env.LINKER }} ==="
 
-      # ------------------------------------------------------------
-      # Save APT cache
-      # ------------------------------------------------------------
       - name: Save APT cache
         uses: actions/cache/save@v5
         if: always() && steps.apt-restore.outputs.cache-hit != 'true'
@@ -274,23 +229,16 @@ jobs:
           path: ~/apt-cache
           key: apt-${{ runner.os }}-v4
 
-      # ------------------------------------------------------------
-      # Restore ccache
-      # ------------------------------------------------------------
       - name: Restore ccache
         uses: actions/cache/restore@v5
         id: ccache-restore
         with:
           path: ~/.ccache
-          # Cache separado por compilador (gcc o clang) y versión kernel
           key: ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
           restore-keys: |
             ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR }}.
             ccache-${{ env.COMPILER }}-${{ runner.os }}-
 
-      # ------------------------------------------------------------
-      # Restore kernel build tools
-      # ------------------------------------------------------------
       - name: Restore kernel build tools
         uses: actions/cache/restore@v5
         id: kernel-tools-restore
@@ -305,21 +253,15 @@ jobs:
             kernel-tools-${{ runner.os }}-${{ env.KERNEL_MAJOR }}.
             kernel-tools-${{ runner.os }}-
 
-      # ------------------------------------------------------------
-      # Restore .config generado
-      # ------------------------------------------------------------
       - name: Restore generated .config
         uses: actions/cache/restore@v5
         id: config-restore
         with:
           path: kernel-src/.config
-          key: config-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig') }}
+          key: config-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig') }}
           restore-keys: |
-            config-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-
+            config-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-
 
-      # ------------------------------------------------------------
-      # Check cache restoration
-      # ------------------------------------------------------------
       - name: Check cache restoration
         run: |
           echo "=========================================="
@@ -337,7 +279,6 @@ jobs:
           echo "CACHE RESTORATION STATUS"
           echo "=========================================="
           
-          # ccache
           echo "1️⃣  CCACHE (${{ env.COMPILER }}):"
           if [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ]; then
             echo "   ✅ RESTORED: ${{ steps.ccache-restore.outputs.cache-matched-key }}"
@@ -351,17 +292,15 @@ jobs:
           fi
           echo ""
           
-          # .config
-          echo "2️⃣  KERNEL .CONFIG:"
+          echo "2️⃣  KERNEL .CONFIG (compiler-specific):"
           if [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
-            echo "   ✅ RESTORED: Cached .config (preserves timestamps for ccache)"
+            echo "   ✅ RESTORED: Cached .config for ${{ env.COMPILER }} (preserves timestamps for ccache)"
           else
-            echo "   ⚠️  WILL GENERATE: Fresh .config from defconfig"
+            echo "   ⚠️  WILL GENERATE: Fresh .config from defconfig for ${{ env.COMPILER }}"
             echo "   ⚠️  This may invalidate some ccache entries"
           fi
           echo ""
           
-          # kernel tools
           echo "3️⃣  KERNEL BUILD TOOLS:"
           if [ -n "${{ steps.kernel-tools-restore.outputs.cache-matched-key }}" ]; then
             echo "   ✅ RESTORED: ${{ steps.kernel-tools-restore.outputs.cache-matched-key }}"
@@ -370,7 +309,6 @@ jobs:
           fi
           echo ""
           
-          # Build time prediction
           if [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ] && [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
             echo "⚡ CACHE AVAILABLE + CONFIG CACHED - Build should take ~10-15 minutes"
           elif [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ]; then
@@ -382,23 +320,17 @@ jobs:
           fi
           echo "=========================================="
 
-      # ------------------------------------------------------------
-      # Configure ccache
-      # ------------------------------------------------------------
       - name: Configure ccache
         run: |
-          # Configuración optimizada para tmpfs
           ccache --max-size=5G
           ccache --set-config=compression=true
           ccache --set-config=compression_level=1
           ccache --set-config=sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers
           ccache --set-config=hash_dir=false
           
-          # Usar tmpfs también para ccache temp files (más rápido)
           ccache --set-config=temporary_dir=/tmp/kernel-build/ccache-tmp
           mkdir -p /tmp/kernel-build/ccache-tmp
           
-          # CRÍTICO: Limpiar stats previos para ver uso real
           ccache --zero-stats
           
           echo "=== Ccache Configuration ==="
@@ -414,22 +346,17 @@ jobs:
           which g++
           gcc --version | head -1
 
-      # ------------------------------------------------------------
-      # Prepare kernel configuration
-      # ------------------------------------------------------------
       - name: Prepare kernel configuration
         working-directory: kernel-src
         run: |
-          echo "🔧 Configuring kernel..."
+          echo "🔧 Configuring kernel for ${{ env.COMPILER }}..."
           
-          # Si existe .config cacheado, usarlo
           if [ -f .config ] && [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
-            echo "✅ Using cached .config (preserves timestamps for ccache)"
+            echo "✅ Using cached .config for ${{ env.COMPILER }} (preserves timestamps for ccache)"
             make -s olddefconfig
           else
-            echo "⚙️  Generating fresh config from defconfig"
+            echo "⚙️  Generating fresh config from defconfig for ${{ env.COMPILER }}"
             
-            # Buscar el defconfig personalizado
             if [ -f arch/x86/configs/acer_sw1_011_defconfig ]; then
               echo "✅ Using custom defconfig: acer_sw1_011_defconfig"
               make -s acer_sw1_011_defconfig
@@ -443,11 +370,9 @@ jobs:
               exit 1
             fi
             
-            # Optimizaciones para builds más rápidos
             echo ""
             echo "⚙️  Applying build optimizations..."
             
-            # Deshabilitar debug info (ahorra ~30% tiempo)
             scripts/config --disable CONFIG_DEBUG_INFO
             scripts/config --disable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
             scripts/config --disable CONFIG_DEBUG_INFO_DWARF4
@@ -455,15 +380,12 @@ jobs:
             scripts/config --disable CONFIG_GDB_SCRIPTS
             scripts/config --set-val CONFIG_DEBUG_INFO_NONE y
             
-            # Deshabilitar LOCALVERSION automático (nombres limpios)
             scripts/config --disable CONFIG_LOCALVERSION_AUTO
             
-            # Optimizaciones adicionales de compilación
             scripts/config --enable CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
             scripts/config --disable CONFIG_GCOV_KERNEL
             scripts/config --disable CONFIG_KCOV
             
-            # CRÍTICO para Clang: Deshabilitar LTO (causa problemas)
             if [ "${{ env.COMPILER }}" = "clang" ]; then
               echo "⚙️  Disabling LTO for Clang (avoids build issues)..."
               scripts/config --disable CONFIG_LTO_CLANG
@@ -488,17 +410,12 @@ jobs:
             echo "LTO: disabled (for stability)"
           fi
 
-      # ------------------------------------------------------------
-      # Build kernel .deb packages
-      # ------------------------------------------------------------
       - name: Build .deb kernel packages
         working-directory: kernel-src
         run: |
-          # Setup ccache
           export PATH="/usr/lib/ccache:$PATH"
           export CCACHE_DIR="$HOME/.ccache"
           
-          # Configurar compilador según toolchain
           if [ "${{ env.COMPILER }}" = "clang" ]; then
             export CC="ccache clang"
             export CXX="ccache clang++"
@@ -507,23 +424,18 @@ jobs:
             export LLVM=1
             export LLVM_IAS=1
             
-            # Optimizaciones para Clang x86-64-v2
             export KCFLAGS="-O2 -march=x86-64-v2 -mtune=generic -pipe"
             
-            # Configurar lld
             if [ "${{ env.LINKER }}" = "lld" ]; then
               export LDFLAGS="-fuse-ld=lld"
               echo "✅ Using Clang + lld"
             fi
           else
-            # GCC
             export CC="ccache gcc"
             export CXX="ccache g++"
             
-            # Optimizaciones para GCC Intel Silvermont
             export KCFLAGS="-O2 -march=silvermont -mtune=silvermont -pipe"
             
-            # Configurar linker
             if [ "${{ env.LINKER }}" = "mold" ]; then
               if command -v mold &> /dev/null; then
                 export LDFLAGS="-fuse-ld=mold"
@@ -538,11 +450,9 @@ jobs:
           
           export KCPPFLAGS="-D_FORTIFY_SOURCE=2"
           
-          # Deshabilitar generación de documentación y checks innecesarios
           export KDOC_WERROR=0
           export LOCALVERSION=""
           
-          # Configurar número óptimo de jobs
           NCPUS=$(nproc)
           JOBS=$((NCPUS + 2))
           
@@ -567,7 +477,6 @@ jobs:
           START_TIME=$(date +%s)
           
           echo "🔨 Starting kernel compilation..."
-          # Build optimizado con -s para reducir output
           make -s -j$JOBS \
             KERNELRELEASE=${{ env.KERNEL_VERSION }} \
             KDEB_PKGVERSION=${{ env.KERNEL_VERSION }}-1 \
@@ -594,9 +503,6 @@ jobs:
           echo "📦 Generated .deb packages:"
           ls -lh ../*.deb
 
-      # ------------------------------------------------------------
-      # Show ccache statistics
-      # ------------------------------------------------------------
       - name: Show ccache statistics
         if: always()
         run: |
@@ -606,14 +512,11 @@ jobs:
           ccache --show-stats
           echo ""
           
-          # Parse stats de forma más robusta
           STATS=$(ccache --show-stats)
           
-          # Intentar extraer hits y misses de diferentes formatos
           CACHE_HITS=$(echo "$STATS" | grep -i "hits:" | grep -oE '[0-9]+' | head -1 || echo "0")
           CACHE_MISS=$(echo "$STATS" | grep -i "misses:" | grep -oE '[0-9]+' | head -1 || echo "0")
           
-          # Si no encontró en formato nuevo, intentar formato viejo
           if [ "$CACHE_HITS" = "0" ]; then
             DIRECT=$(echo "$STATS" | grep -iE "(direct|cache hit \(direct\))" | grep -oE '[0-9]+' | head -1 || echo "0")
             PREPROC=$(echo "$STATS" | grep -iE "(preprocessed|cache hit \(preprocessed\))" | grep -oE '[0-9]+' | head -1 || echo "0")
@@ -660,20 +563,13 @@ jobs:
           echo "💾 Final cache size: $FINAL_SIZE"
           echo "=========================================="
 
-      # ------------------------------------------------------------
-      # Save ccache
-      # ------------------------------------------------------------
       - name: Save ccache
         uses: actions/cache/save@v5
         if: always()
         with:
           path: ~/.ccache
-          # Cache sin sufijo único para ser reutilizado
           key: ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
 
-      # ------------------------------------------------------------
-      # Save kernel build tools
-      # ------------------------------------------------------------
       - name: Save kernel build tools
         uses: actions/cache/save@v5
         if: always() && steps.kernel-tools-restore.outputs.cache-hit != 'true'
@@ -685,19 +581,13 @@ jobs:
             kernel-src/tools/objtool/
           key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
 
-      # ------------------------------------------------------------
-      # Save .config generado
-      # ------------------------------------------------------------
       - name: Save generated .config
         uses: actions/cache/save@v5
         if: always() && steps.config-restore.outputs.cache-hit != 'true'
         with:
           path: kernel-src/.config
-          key: config-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig') }}
+          key: config-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig') }}
 
-      # ------------------------------------------------------------
-      # Save build metrics
-      # ------------------------------------------------------------
       - name: Save build metrics
         if: always()
         run: |
@@ -721,29 +611,9 @@ jobs:
             ccache --show-stats 2>/dev/null || echo "ccache stats not available"
             echo "=========================================="
           } > build-metrics.txt
-          
-          echo ""
-          echo "🔍 DEBUG: Searching for .deb files..."
-          echo "Current directory: $(pwd)"
-          echo ""
-          echo "In current directory:"
-          ls -la *.deb 2>/dev/null || echo "  No .deb files here"
-          echo ""
-          echo "In /tmp/kernel-build/..:"
-          ls -la /tmp/kernel-build/../*.deb 2>/dev/null || echo "  No .deb files here"
-          echo ""
-          echo "Searching entire /tmp:"
-          find /tmp -name "*.deb" -ls 2>/dev/null | head -20 || echo "  No .deb files found"
-          echo ""
-          echo "Searching workspace:"
-          find "$GITHUB_WORKSPACE" -name "*.deb" -ls 2>/dev/null || echo "  No .deb files found"
 
-      # ------------------------------------------------------------
-      # Generate CHANGELOG
-      # ------------------------------------------------------------
       - name: Generate CHANGELOG
         run: |
-          # Restaurar temporalmente .git para el changelog
           mv kernel-git-backup kernel-src/.git
           
           cd kernel-src
@@ -795,23 +665,37 @@ jobs:
             echo "\`\`\`"
           } > ../CHANGELOG.md
           
-          # Remover .git nuevamente
           cd ..
           mv kernel-src/.git kernel-git-backup
 
-      # ------------------------------------------------------------
-      # Collect release files
-      # ------------------------------------------------------------
       - name: Collect release files
         run: |
           mkdir -p release
           
-          if ls *.deb 1> /dev/null 2>&1; then
+          echo "🔍 Locating .deb files..."
+          echo "Current directory: $(pwd)"
+          echo ""
+          
+          if ls /tmp/*.deb 1> /dev/null 2>&1; then
+            echo "✅ Found .deb files in /tmp/"
+            cp /tmp/*.deb release/
+            DEB_COUNT=$(ls /tmp/*.deb | wc -l)
+            echo "✅ Copied $DEB_COUNT .deb package(s)"
+          elif ls *.deb 1> /dev/null 2>&1; then
+            echo "✅ Found .deb files in current directory"
             cp *.deb release/
             DEB_COUNT=$(ls *.deb | wc -l)
             echo "✅ Copied $DEB_COUNT .deb package(s)"
           else
             echo "❌ ERROR: No .deb files found!"
+            echo ""
+            echo "Searching in common locations:"
+            echo "- Current dir: $(pwd)"
+            ls -la *.deb 2>/dev/null || echo "  No .deb here"
+            echo "- /tmp/:"
+            ls -la /tmp/*.deb 2>/dev/null || echo "  No .deb here"
+            echo "- /tmp/kernel-build/..:"
+            ls -la /tmp/kernel-build/../*.deb 2>/dev/null || echo "  No .deb here"
             exit 1
           fi
           
@@ -831,9 +715,6 @@ jobs:
           cat SHA256SUMS.txt
           echo "=========================================="
 
-      # ------------------------------------------------------------
-      # Upload artifacts (always, for debugging)
-      # ------------------------------------------------------------
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         if: always()
@@ -845,9 +726,6 @@ jobs:
             release/*.md
             kernel-src/build.log
             
-      # ------------------------------------------------------------
-      # Create or Update GitHub Release
-      # ------------------------------------------------------------
       - name: Create or Update GitHub Release
         run: |
           echo "=========================================="
@@ -856,7 +734,6 @@ jobs:
           echo "Tag: ${{ env.RELEASE_TAG }}"
           echo ""
           
-          # Crear release nueva (la vieja ya fue borrada si existía)
           gh release create "${{ env.RELEASE_TAG }}" \
             release/*.deb \
             release/SHA256SUMS.txt \
@@ -872,9 +749,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
 
-      # ------------------------------------------------------------
-      # Summary
-      # ------------------------------------------------------------
       - name: Build summary
         if: always()
         run: |
