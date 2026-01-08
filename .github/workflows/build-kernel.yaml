@@ -3,6 +3,23 @@ name: Build Kernel and Create Release
 on:
   workflow_dispatch:
     inputs:
+      compiler:
+        description: 'Compiler to use'
+        required: false
+        type: choice
+        options:
+          - gcc
+          - clang
+        default: gcc
+      linker:
+        description: 'Linker to use'
+        required: false
+        type: choice
+        options:
+          - mold
+          - lld
+          - ld
+        default: mold
       prerelease:
         description: 'Mark as pre-release'
         required: false
@@ -18,14 +35,14 @@ jobs:
       contents: write  # Necesario para crear releases
     steps:
       # ------------------------------------------------------------
-      # Checkout kernel source
+      # Checkout kernel source (optimized)
       # ------------------------------------------------------------
       - name: Checkout kernel source
         uses: actions/checkout@v6
         with:
           repository: CypherNoodle/linux-Sw1-011
           path: kernel-src
-          fetch-depth: 35
+          fetch-depth: 50
           filter: blob:limit=1m
 
       # ------------------------------------------------------------
@@ -49,8 +66,8 @@ jobs:
           echo "Source code size (without .git): $SOURCE_SIZE"
           echo "Git history size: $GIT_SIZE"
           
-          # Usar 6GB para tmpfs
-          TMPFS_SIZE="6G"
+          # Usar 4GB para tmpfs (suficiente para código sin .git)
+          TMPFS_SIZE="4G"
           
           # Crear directorio tmpfs
           sudo mkdir -p /tmp/kernel-build
@@ -185,17 +202,33 @@ jobs:
           # Instalar dependencias en paralelo
           sudo apt-get update -qq
           
-          # Instalar mold (linker ultra-rápido)
-          if apt-cache show mold >/dev/null 2>&1; then
-            echo "📦 Installing mold (fast linker)..."
-            sudo apt-get install -y -qq mold
+          LINKER="${{ github.event.inputs.linker }}"
+          if [ -z "$LINKER" ]; then
+            LINKER="mold"
           fi
           
-          # Instalar dependencias core en una sola operación
+          # Instalar linker seleccionado
+          if [ "$LINKER" = "mold" ]; then
+            echo "📦 Installing mold (ultra-fast linker)..."
+            sudo apt-get install -y -qq mold || echo "⚠️  mold not available, will use fallback"
+          elif [ "$LINKER" = "lld" ]; then
+            echo "📦 Installing lld (LLVM linker)..."
+            sudo apt-get install -y -qq lld-18 || sudo apt-get install -y -qq lld
+          fi
+          # ld viene incluido en binutils (ya instalado)
+          
+          # Instalar dependencias core
           sudo apt-get install -y -qq --no-install-recommends \
             build-essential bc libssl-dev libelf-dev libncurses-dev \
             debhelper kmod cpio ccache libdw-dev \
             zstd pigz lz4
+          
+          # Si se seleccionó Clang, instalarlo
+          COMPILER="${{ github.event.inputs.compiler }}"
+          if [ "$COMPILER" = "clang" ]; then
+            echo "📦 Installing Clang/LLVM toolchain..."
+            sudo apt-get install -y -qq clang-18 llvm-18
+          fi
           
           echo "Saving APT cache..."
           mkdir -p ~/apt-cache
@@ -206,6 +239,24 @@ jobs:
           echo "CPU cores: $(nproc)"
           echo "Memory: $(free -h | grep Mem | awk '{print $2}')"
           echo "Disk space: $(df -h / | tail -1 | awk '{print $4}') free"
+          echo ""
+          echo "=== Toolchain Selected ==="
+          
+          # Mostrar compilador seleccionado
+          if [ -z "$COMPILER" ] || [ "$COMPILER" = "gcc" ]; then
+            echo "Compiler: GCC $(gcc --version | head -1)"
+          else
+            echo "Compiler: Clang $(clang-18 --version | head -1)"
+          fi
+          
+          # Mostrar linker seleccionado
+          if [ "$LINKER" = "mold" ] && command -v mold &> /dev/null; then
+            echo "Linker: mold $(mold --version | head -1)"
+          elif [ "$LINKER" = "lld" ] && command -v ld.lld &> /dev/null; then
+            echo "Linker: lld $(ld.lld --version | head -1)"
+          else
+            echo "Linker: GNU ld $(ld --version | head -1)"
+          fi
 
       # ------------------------------------------------------------
       # Save APT cache
@@ -225,10 +276,12 @@ jobs:
         id: ccache-restore
         with:
           path: ~/.ccache
-          key: ccache-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
+          # Cache incluye compilador y linker en la key
+          key: ccache-${{ github.event.inputs.compiler || 'gcc' }}-${{ github.event.inputs.linker || 'mold' }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ env.KERNEL_MAJOR }}.
-            ccache-${{ runner.os }}-
+            ccache-${{ github.event.inputs.compiler || 'gcc' }}-${{ github.event.inputs.linker || 'mold' }}-${{ runner.os }}-${{ env.KERNEL_MAJOR }}.
+            ccache-${{ github.event.inputs.compiler || 'gcc' }}-${{ github.event.inputs.linker || 'mold' }}-${{ runner.os }}-
+            ccache-${{ github.event.inputs.compiler || 'gcc' }}-${{ runner.os }}-
 
       # ------------------------------------------------------------
       # Restore kernel build tools
@@ -404,6 +457,15 @@ jobs:
             scripts/config --disable CONFIG_GCOV_KERNEL
             scripts/config --disable CONFIG_KCOV
             
+            # CRÍTICO para Clang: Deshabilitar LTO (causa problemas)
+            if [ "${{ github.event.inputs.compiler }}" = "clang" ]; then
+              echo "⚙️  Disabling LTO for Clang (avoids build issues)..."
+              scripts/config --disable CONFIG_LTO_CLANG
+              scripts/config --disable CONFIG_LTO_CLANG_THIN
+              scripts/config --disable CONFIG_LTO_CLANG_FULL
+              scripts/config --disable CONFIG_CFI_CLANG
+            fi
+            
             make olddefconfig
           fi
           
@@ -411,9 +473,13 @@ jobs:
           echo "=== Configuration summary ==="
           echo "Config used: acer_sw1_011_defconfig"
           echo "Config cached: ${{ steps.config-restore.outputs.cache-hit }}"
+          echo "Compiler: ${{ github.event.inputs.compiler || 'gcc' }}"
           echo "Debug info: disabled"
           echo "Localversion auto: disabled"
           echo "Optimization: performance"
+          if [ "${{ github.event.inputs.compiler }}" = "clang" ]; then
+            echo "LTO: disabled (for stability)"
+          fi
 
       # ------------------------------------------------------------
       # Build kernel .deb packages
@@ -466,7 +532,7 @@ jobs:
           
           echo "🔨 Starting kernel compilation..."
           # Build optimizado - deshabilitar verificaciones innecesarias
-          make -s -j$JOBS \
+          make -j$JOBS \
             KERNELRELEASE=${{ env.KERNEL_VERSION }} \
             KDEB_PKGVERSION=${{ env.KERNEL_VERSION }}-1 \
             KDEB_SOURCENAME=linux-custom \
@@ -570,7 +636,8 @@ jobs:
         if: always()
         with:
           path: ~/.ccache
-          key: ccache-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
+          # Agregar timestamp para evitar conflictos
+          key: ccache-${{ github.event.inputs.compiler || 'gcc' }}-${{ github.event.inputs.linker || 'mold' }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ github.run_id }}
 
       # ------------------------------------------------------------
       # Save kernel build tools
@@ -594,7 +661,7 @@ jobs:
         if: always() && steps.config-restore.outputs.cache-hit != 'true'
         with:
           path: kernel-src/.config
-          key: config-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig') }}
+          key: config-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig') }}-${{ github.run_id }}
 
       # ------------------------------------------------------------
       # Save build metrics
@@ -618,9 +685,25 @@ jobs:
             echo "tools restored from: ${{ steps.kernel-tools-restore.outputs.cache-matched-key }}"
             echo ""
             echo "=== Ccache Statistics ==="
-            ccache --show-stats
+            ccache --show-stats 2>/dev/null || echo "ccache stats not available"
             echo "=========================================="
           } > build-metrics.txt
+          
+          echo ""
+          echo "🔍 DEBUG: Searching for .deb files..."
+          echo "Current directory: $(pwd)"
+          echo ""
+          echo "In current directory:"
+          ls -la *.deb 2>/dev/null || echo "  No .deb files here"
+          echo ""
+          echo "In /tmp/kernel-build/..:"
+          ls -la /tmp/kernel-build/../*.deb 2>/dev/null || echo "  No .deb files here"
+          echo ""
+          echo "Searching entire /tmp:"
+          find /tmp -name "*.deb" -ls 2>/dev/null | head -20 || echo "  No .deb files found"
+          echo ""
+          echo "Searching workspace:"
+          find "$GITHUB_WORKSPACE" -name "*.deb" -ls 2>/dev/null || echo "  No .deb files found"
 
       # ------------------------------------------------------------
       # Generate CHANGELOG
