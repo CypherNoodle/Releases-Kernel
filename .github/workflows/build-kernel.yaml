@@ -3,23 +3,15 @@ name: Build Kernel and Create Release
 on:
   workflow_dispatch:
     inputs:
-      compiler:
-        description: 'Compiler to use'
+      toolchain:
+        description: 'Compiler + Linker combination'
         required: false
         type: choice
         options:
-          - gcc
-          - clang
-        default: gcc
-      linker:
-        description: 'Linker to use'
-        required: false
-        type: choice
-        options:
-          - mold
-          - lld
-          - ld
-        default: mold
+          - gcc-mold
+          - gcc-ld
+          - clang-lld
+        default: gcc-mold
       prerelease:
         description: 'Mark as pre-release'
         required: false
@@ -42,7 +34,7 @@ jobs:
         with:
           repository: CypherNoodle/linux-Sw1-011
           path: kernel-src
-          fetch-depth: 50
+          fetch-depth: 32  # 30 commits para changelog + 2 de margen
           filter: blob:limit=1m
 
       # ------------------------------------------------------------
@@ -66,8 +58,8 @@ jobs:
           echo "Source code size (without .git): $SOURCE_SIZE"
           echo "Git history size: $GIT_SIZE"
           
-          # Usar 4GB para tmpfs (suficiente para código sin .git)
-          TMPFS_SIZE="4G"
+          # Usar 6GB para tmpfs
+          TMPFS_SIZE="6G"
           
           # Crear directorio tmpfs
           sudo mkdir -p /tmp/kernel-build
@@ -144,6 +136,43 @@ jobs:
           echo "Release will be tagged as: $RELEASE_TAG"
 
       # ------------------------------------------------------------
+      # Determine toolchain variables
+      # ------------------------------------------------------------
+      - name: Determine toolchain variables
+        id: toolchain
+        run: |
+          TOOLCHAIN="${{ github.event.inputs.toolchain }}"
+          if [ -z "$TOOLCHAIN" ]; then
+            TOOLCHAIN="gcc-mold"
+          fi
+          
+          # Determinar compilador y linker
+          case "$TOOLCHAIN" in
+            "gcc-mold")
+              COMPILER="gcc"
+              LINKER="mold"
+              ;;
+            "gcc-ld")
+              COMPILER="gcc"
+              LINKER="ld"
+              ;;
+            "clang-lld")
+              COMPILER="clang"
+              LINKER="lld"
+              ;;
+            *)
+              echo "❌ Unknown toolchain: $TOOLCHAIN"
+              exit 1
+              ;;
+          esac
+          
+          echo "COMPILER=$COMPILER" >> $GITHUB_ENV
+          echo "LINKER=$LINKER" >> $GITHUB_ENV
+          echo "compiler=$COMPILER" >> $GITHUB_OUTPUT
+          echo "linker=$LINKER" >> $GITHUB_OUTPUT
+          echo "Selected toolchain: $COMPILER + $LINKER"
+
+      # ------------------------------------------------------------
       # Check if release already exists
       # ------------------------------------------------------------
       - name: Check if release exists
@@ -202,33 +231,26 @@ jobs:
           # Instalar dependencias en paralelo
           sudo apt-get update -qq
           
-          LINKER="${{ github.event.inputs.linker }}"
-          if [ -z "$LINKER" ]; then
-            LINKER="mold"
-          fi
-          
-          # Instalar linker seleccionado
-          if [ "$LINKER" = "mold" ]; then
-            echo "📦 Installing mold (ultra-fast linker)..."
-            sudo apt-get install -y -qq mold || echo "⚠️  mold not available, will use fallback"
-          elif [ "$LINKER" = "lld" ]; then
-            echo "📦 Installing lld (LLVM linker)..."
-            sudo apt-get install -y -qq lld-18 || sudo apt-get install -y -qq lld
-          fi
-          # ld viene incluido en binutils (ya instalado)
+          # Instalar según toolchain
+          case "${{ env.COMPILER }}-${{ env.LINKER }}" in
+            "gcc-mold")
+              echo "📦 Installing GCC + mold..."
+              sudo apt-get install -y -qq mold || echo "⚠️  mold not available"
+              ;;
+            "gcc-ld")
+              echo "📦 Using GCC + ld (default, no extra packages)"
+              ;;
+            "clang-lld")
+              echo "📦 Installing Clang + lld..."
+              sudo apt-get install -y -qq clang llvm lld
+              ;;
+          esac
           
           # Instalar dependencias core
           sudo apt-get install -y -qq --no-install-recommends \
             build-essential bc libssl-dev libelf-dev libncurses-dev \
             debhelper kmod cpio ccache libdw-dev \
             zstd pigz lz4
-          
-          # Si se seleccionó Clang, instalarlo
-          COMPILER="${{ github.event.inputs.compiler }}"
-          if [ "$COMPILER" = "clang" ]; then
-            echo "📦 Installing Clang/LLVM toolchain..."
-            sudo apt-get install -y -qq clang-18 llvm-18
-          fi
           
           echo "Saving APT cache..."
           mkdir -p ~/apt-cache
@@ -240,23 +262,7 @@ jobs:
           echo "Memory: $(free -h | grep Mem | awk '{print $2}')"
           echo "Disk space: $(df -h / | tail -1 | awk '{print $4}') free"
           echo ""
-          echo "=== Toolchain Selected ==="
-          
-          # Mostrar compilador seleccionado
-          if [ -z "$COMPILER" ] || [ "$COMPILER" = "gcc" ]; then
-            echo "Compiler: GCC $(gcc --version | head -1)"
-          else
-            echo "Compiler: Clang $(clang-18 --version | head -1)"
-          fi
-          
-          # Mostrar linker seleccionado
-          if [ "$LINKER" = "mold" ] && command -v mold &> /dev/null; then
-            echo "Linker: mold $(mold --version | head -1)"
-          elif [ "$LINKER" = "lld" ] && command -v ld.lld &> /dev/null; then
-            echo "Linker: lld $(ld.lld --version | head -1)"
-          else
-            echo "Linker: GNU ld $(ld --version | head -1)"
-          fi
+          echo "=== Toolchain Selected: ${{ env.COMPILER }} + ${{ env.LINKER }} ==="
 
       # ------------------------------------------------------------
       # Save APT cache
@@ -276,12 +282,11 @@ jobs:
         id: ccache-restore
         with:
           path: ~/.ccache
-          # Cache incluye compilador y linker en la key
-          key: ccache-${{ github.event.inputs.compiler || 'gcc' }}-${{ github.event.inputs.linker || 'mold' }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
+          # Cache separado por compilador (gcc o clang) y versión kernel
+          key: ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
           restore-keys: |
-            ccache-${{ github.event.inputs.compiler || 'gcc' }}-${{ github.event.inputs.linker || 'mold' }}-${{ runner.os }}-${{ env.KERNEL_MAJOR }}.
-            ccache-${{ github.event.inputs.compiler || 'gcc' }}-${{ github.event.inputs.linker || 'mold' }}-${{ runner.os }}-
-            ccache-${{ github.event.inputs.compiler || 'gcc' }}-${{ runner.os }}-
+            ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR }}.
+            ccache-${{ env.COMPILER }}-${{ runner.os }}-
 
       # ------------------------------------------------------------
       # Restore kernel build tools
@@ -326,13 +331,14 @@ jobs:
           echo "Branch: ${{ github.ref_name }}"
           echo "Release Exists: ${{ steps.check_release.outputs.exists }}"
           echo "Config: acer_sw1_011_defconfig"
+          echo "Toolchain: ${{ env.COMPILER }} + ${{ env.LINKER }}"
           echo ""
           echo "=========================================="
           echo "CACHE RESTORATION STATUS"
           echo "=========================================="
           
           # ccache
-          echo "1️⃣  CCACHE:"
+          echo "1️⃣  CCACHE (${{ env.COMPILER }}):"
           if [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ]; then
             echo "   ✅ RESTORED: ${{ steps.ccache-restore.outputs.cache-matched-key }}"
             if [ -d ~/.ccache ]; then
@@ -419,17 +425,17 @@ jobs:
           # Si existe .config cacheado, usarlo
           if [ -f .config ] && [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
             echo "✅ Using cached .config (preserves timestamps for ccache)"
-            make olddefconfig
+            make -s olddefconfig
           else
             echo "⚙️  Generating fresh config from defconfig"
             
             # Buscar el defconfig personalizado
             if [ -f arch/x86/configs/acer_sw1_011_defconfig ]; then
               echo "✅ Using custom defconfig: acer_sw1_011_defconfig"
-              make acer_sw1_011_defconfig
+              make -s acer_sw1_011_defconfig
             elif [ -f arch/arm64/configs/acer_sw1_011_defconfig ]; then
               echo "✅ Using custom defconfig: acer_sw1_011_defconfig (ARM64)"
-              make acer_sw1_011_defconfig
+              make -s acer_sw1_011_defconfig
             else
               echo "❌ ERROR: acer_sw1_011_defconfig not found!"
               echo "Available defconfigs in arch/x86/configs/:"
@@ -458,7 +464,7 @@ jobs:
             scripts/config --disable CONFIG_KCOV
             
             # CRÍTICO para Clang: Deshabilitar LTO (causa problemas)
-            if [ "${{ github.event.inputs.compiler }}" = "clang" ]; then
+            if [ "${{ env.COMPILER }}" = "clang" ]; then
               echo "⚙️  Disabling LTO for Clang (avoids build issues)..."
               scripts/config --disable CONFIG_LTO_CLANG
               scripts/config --disable CONFIG_LTO_CLANG_THIN
@@ -466,18 +472,19 @@ jobs:
               scripts/config --disable CONFIG_CFI_CLANG
             fi
             
-            make olddefconfig
+            make -s olddefconfig
           fi
           
           echo ""
           echo "=== Configuration summary ==="
           echo "Config used: acer_sw1_011_defconfig"
           echo "Config cached: ${{ steps.config-restore.outputs.cache-hit }}"
-          echo "Compiler: ${{ github.event.inputs.compiler || 'gcc' }}"
+          echo "Compiler: ${{ env.COMPILER }}"
+          echo "Linker: ${{ env.LINKER }}"
           echo "Debug info: disabled"
           echo "Localversion auto: disabled"
           echo "Optimization: performance"
-          if [ "${{ github.event.inputs.compiler }}" = "clang" ]; then
+          if [ "${{ env.COMPILER }}" = "clang" ]; then
             echo "LTO: disabled (for stability)"
           fi
 
@@ -490,17 +497,45 @@ jobs:
           # Setup ccache
           export PATH="/usr/lib/ccache:$PATH"
           export CCACHE_DIR="$HOME/.ccache"
-          export CC="ccache gcc"
-          export CXX="ccache g++"
           
-          # Usar mold si está disponible (3-5x más rápido que ld)
-          if command -v mold &> /dev/null; then
-            export LDFLAGS="-fuse-ld=mold"
-            echo "✅ Using mold linker (ultra-fast)"
+          # Configurar compilador según toolchain
+          if [ "${{ env.COMPILER }}" = "clang" ]; then
+            export CC="ccache clang"
+            export CXX="ccache clang++"
+            export HOSTCC="clang"
+            export HOSTCXX="clang++"
+            export LLVM=1
+            export LLVM_IAS=1
+            
+            # Optimizaciones para Clang x86-64-v2
+            export KCFLAGS="-O2 -march=x86-64-v2 -mtune=generic -pipe"
+            
+            # Configurar lld
+            if [ "${{ env.LINKER }}" = "lld" ]; then
+              export LDFLAGS="-fuse-ld=lld"
+              echo "✅ Using Clang + lld"
+            fi
+          else
+            # GCC
+            export CC="ccache gcc"
+            export CXX="ccache g++"
+            
+            # Optimizaciones para GCC Intel Silvermont
+            export KCFLAGS="-O2 -march=silvermont -mtune=silvermont -pipe"
+            
+            # Configurar linker
+            if [ "${{ env.LINKER }}" = "mold" ]; then
+              if command -v mold &> /dev/null; then
+                export LDFLAGS="-fuse-ld=mold"
+                echo "✅ Using GCC + mold (ultra-fast)"
+              else
+                echo "⚠️  mold not available, using default ld"
+              fi
+            else
+              echo "✅ Using GCC + ld (default)"
+            fi
           fi
           
-          # Optimizations for Intel x5-Z8300
-          export KCFLAGS="-O2 -march=silvermont -mtune=silvermont -pipe"
           export KCPPFLAGS="-D_FORTIFY_SOURCE=2"
           
           # Deshabilitar generación de documentación y checks innecesarios
@@ -514,32 +549,32 @@ jobs:
           echo "=========================================="
           echo "BUILD CONFIGURATION"
           echo "=========================================="
-          echo "Compiler: $(gcc --version | head -1)"
+          if [ "${{ env.COMPILER }}" = "clang" ]; then
+            echo "Compiler: $(clang --version | head -1)"
+            echo "Target Arch: x86-64-v2 (generic optimization)"
+          else
+            echo "Compiler: $(gcc --version | head -1)"
+            echo "Target Arch: Intel x5-Z8300 (Silvermont)"
+          fi
           echo "Ccache: $(ccache --version | head -1)"
+          echo "Linker: ${{ env.LINKER }}"
           echo "CPU Cores: $NCPUS"
           echo "Parallel Jobs: $JOBS"
-          echo "Target Platform: Intel x5-Z8300 (Silvermont)"
           echo "Kernel Version: ${{ env.KERNEL_VERSION }}"
-          if command -v mold &> /dev/null; then
-            echo "Linker: mold (fast)"
-          else
-            echo "Linker: ld (default)"
-          fi
           echo "=========================================="
           echo ""
           
           START_TIME=$(date +%s)
           
           echo "🔨 Starting kernel compilation..."
-          # Build optimizado - deshabilitar verificaciones innecesarias
-          make -j$JOBS \
+          # Build optimizado con -s para reducir output
+          make -s -j$JOBS \
             KERNELRELEASE=${{ env.KERNEL_VERSION }} \
             KDEB_PKGVERSION=${{ env.KERNEL_VERSION }}-1 \
             KDEB_SOURCENAME=linux-custom \
             KDEB_COMPRESS=xz \
             INSTALL_MOD_STRIP=1 \
             CONFIG_SHELL=/bin/bash \
-            V=0 \
             bindeb-pkg 2>&1 | tee build.log
           
           END_TIME=$(date +%s)
@@ -575,9 +610,6 @@ jobs:
           STATS=$(ccache --show-stats)
           
           # Intentar extraer hits y misses de diferentes formatos
-          # Formato nuevo: "Hits:              12345 / 67890 (18.20%)"
-          # Formato viejo: "cache hit (direct)     12345"
-          
           CACHE_HITS=$(echo "$STATS" | grep -i "hits:" | grep -oE '[0-9]+' | head -1 || echo "0")
           CACHE_MISS=$(echo "$STATS" | grep -i "misses:" | grep -oE '[0-9]+' | head -1 || echo "0")
           
@@ -636,8 +668,8 @@ jobs:
         if: always()
         with:
           path: ~/.ccache
-          # Agregar timestamp para evitar conflictos
-          key: ccache-${{ github.event.inputs.compiler || 'gcc' }}-${{ github.event.inputs.linker || 'mold' }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ github.run_id }}
+          # Cache sin sufijo único para ser reutilizado
+          key: ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
 
       # ------------------------------------------------------------
       # Save kernel build tools
@@ -661,7 +693,7 @@ jobs:
         if: always() && steps.config-restore.outputs.cache-hit != 'true'
         with:
           path: kernel-src/.config
-          key: config-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig') }}-${{ github.run_id }}
+          key: config-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig') }}
 
       # ------------------------------------------------------------
       # Save build metrics
@@ -678,6 +710,7 @@ jobs:
             echo "Build Number: #${{ github.run_number }}"
             echo "Branch: ${{ github.ref_name }}"
             echo "Commit: ${{ github.sha }}"
+            echo "Toolchain: ${{ env.COMPILER }} + ${{ env.LINKER }}"
             echo "Build Time: ${{ env.BUILD_TIME }} seconds ($((${{ env.BUILD_TIME }} / 60))m $((${{ env.BUILD_TIME }} % 60))s)"
             echo ""
             echo "=== Cache Information ==="
@@ -710,6 +743,9 @@ jobs:
       # ------------------------------------------------------------
       - name: Generate CHANGELOG
         run: |
+          # Restaurar temporalmente .git para el changelog
+          mv kernel-git-backup kernel-src/.git
+          
           cd kernel-src
           {
             echo "# Linux Kernel ${{ env.KERNEL_VERSION }} - Build Release"
@@ -719,8 +755,14 @@ jobs:
             echo "- **Kernel Version:** ${{ env.KERNEL_VERSION }}"
             echo "- **Build Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
             echo "- **Build Time:** $((${{ env.BUILD_TIME }} / 60)) minutes $((${{ env.BUILD_TIME }} % 60)) seconds"
-            echo "- **Target Platform:** Intel x5-Z8300 (Silvermont)"
-            echo "- **Compiler:** GCC with optimizations (-march=silvermont -mtune=silvermont)"
+            echo "- **Toolchain:** ${{ env.COMPILER }} + ${{ env.LINKER }}"
+            if [ "${{ env.COMPILER }}" = "gcc" ]; then
+              echo "- **Target Platform:** Intel x5-Z8300 (Silvermont)"
+              echo "- **Compiler Flags:** -march=silvermont -mtune=silvermont"
+            else
+              echo "- **Target Platform:** x86-64-v2 (generic)"
+              echo "- **Compiler Flags:** -march=x86-64-v2 -mtune=generic"
+            fi
             echo ""
             echo "## Installation"
             echo ""
@@ -752,6 +794,10 @@ jobs:
             echo "sha256sum -c SHA256SUMS.txt"
             echo "\`\`\`"
           } > ../CHANGELOG.md
+          
+          # Remover .git nuevamente
+          cd ..
+          mv kernel-src/.git kernel-git-backup
 
       # ------------------------------------------------------------
       # Collect release files
@@ -837,6 +883,7 @@ jobs:
           echo "=========================================="
           echo "Kernel Version: ${{ env.KERNEL_VERSION }}"
           echo "Release Tag: ${{ env.RELEASE_TAG }}"
+          echo "Toolchain: ${{ env.COMPILER }} + ${{ env.LINKER }}"
           echo "Build Time: $((${{ env.BUILD_TIME }} / 60))m $((${{ env.BUILD_TIME }} % 60))s"
           echo ""
           echo "📦 Release URL:"
