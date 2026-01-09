@@ -192,6 +192,10 @@ jobs:
           sudo apt-get update -qq
           
           case "${{ env.COMPILER }}-${{ env.LINKER }}" in
+            "gcc-mold")
+              echo "📦 Installing GCC + mold..."
+              sudo apt-get install -y -qq mold || echo "⚠️  mold not available"
+              ;;
             "gcc-ld")
               echo "📦 Using GCC + ld (default, no extra packages)"
               ;;
@@ -204,7 +208,7 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends \
             build-essential bc libssl-dev libelf-dev libncurses-dev \
             debhelper kmod cpio ccache libdw-dev \
-            zstd pigz lz4 mold
+            zstd pigz lz4
           
           echo "Saving APT cache..."
           mkdir -p ~/apt-cache
@@ -282,6 +286,10 @@ jobs:
               SIZE=$(du -sh ~/.ccache 2>/dev/null | cut -f1)
               FILES=$(find ~/.ccache -type f 2>/dev/null | wc -l)
               echo "   📦 Size: $SIZE ($FILES files)"
+              
+              # Verificar que ccache tiene contenido útil
+              OBJECTS=$(find ~/.ccache -name "*.o" 2>/dev/null | wc -l)
+              echo "   🔍 Cached objects: $OBJECTS"
             fi
           else
             echo "   ❌ NOT FOUND - First build will take ~50 minutes"
@@ -290,10 +298,13 @@ jobs:
           
           echo "2️⃣  KERNEL .CONFIG (compiler-specific):"
           if [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
-            echo "   ✅ RESTORED: Cached .config for ${{ env.COMPILER }} (preserves timestamps for ccache)"
+            echo "   ✅ RESTORED: Cached .config for ${{ env.COMPILER }}"
+            if [ -f kernel-src/.config ]; then
+              echo "   📅 Timestamp: $(stat -c %y kernel-src/.config 2>/dev/null || stat -f %Sm kernel-src/.config)"
+            fi
           else
             echo "   ⚠️  WILL GENERATE: Fresh .config from defconfig for ${{ env.COMPILER }}"
-            echo "   ⚠️  This may invalidate some ccache entries"
+            echo "   ⚠️  This WILL invalidate ccache entries (timestamps change)"
           fi
           echo ""
           
@@ -306,10 +317,12 @@ jobs:
           echo ""
           
           if [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ] && [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
-            echo "⚡ CACHE AVAILABLE + CONFIG CACHED - Build should take ~10-15 minutes"
+            echo "⚡ EXCELLENT! Cache + Config cached - Build should take ~10-15 minutes"
           elif [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ]; then
-            echo "⚠️  CACHE AVAILABLE but CONFIG CHANGED - Build may take ~30-40 minutes"
-            echo "💡 Next build will be faster with cached config"
+            echo "⚠️  WARNING: Cache available BUT config will be regenerated"
+            echo "   This changes .config timestamps and invalidates most ccache entries"
+            echo "   Expected build time: ~40-50 minutes (almost like no cache)"
+            echo "💡 Next build will be fast once .config is cached"
           else
             echo "⏰ NO CACHE - Full build will take ~50-60 minutes"
             echo "💡 Subsequent builds will be much faster!"
@@ -399,9 +412,9 @@ jobs:
           echo "Debug info: disabled"
           echo "Localversion auto: disabled"
           if [ "${{ env.COMPILER }}" = "clang" ]; then
-            echo "Optimization: Performance (x86-64-v2 (generic optimization))"
-            echo "LTO: disabled (for debug stability)"
-          else 
+            echo "Optimization: x86-64-v2 (generic optimization)"
+            echo "LTO: disabled (for stability)"
+          else
             echo "Optimization: Intel x5-Z8300 (Silvermont)"
           fi
 
@@ -558,6 +571,23 @@ jobs:
           echo "💾 Final cache size: $FINAL_SIZE"
           echo "=========================================="
 
+      - name: Delete old ccache before saving new one
+        if: always() && steps.ccache-restore.outputs.cache-matched-key != ''
+        continue-on-error: true
+        run: |
+          echo "🗑️  Deleting old ccache: ${{ steps.ccache-restore.outputs.cache-matched-key }}"
+          gh cache delete "${{ steps.ccache-restore.outputs.cache-matched-key }}" || echo "Cache already deleted or not found"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Save ccache
+        uses: actions/cache/save@v5
+        if: always()
+        with:
+          path: ~/.ccache
+          # Key fija - se elimina el anterior antes de guardar, así siempre hay solo uno
+          key: ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
+
       - name: Save kernel build tools
         uses: actions/cache/save@v5
         if: always() && steps.kernel-tools-restore.outputs.cache-hit != 'true'
@@ -575,13 +605,6 @@ jobs:
         with:
           path: kernel-src/.config
           key: config-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig') }}
-
-      - name: Save ccache
-        uses: actions/cache/save@v5
-        if: always()
-        with:
-          path: ~/.ccache
-          key: ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
 
       - name: Save build metrics
         if: always()
@@ -609,8 +632,9 @@ jobs:
 
       - name: Generate CHANGELOG
         run: |
+          # Restaurar temporalmente .git para el changelog
           mv kernel-git-backup kernel-src/.git
-  
+          
           cd kernel-src
           {
             echo "# Linux Kernel ${{ env.KERNEL_VERSION }} - Build Release"
@@ -659,6 +683,14 @@ jobs:
             echo "sha256sum -c SHA256SUMS.txt"
             echo "\`\`\`"
           } > CHANGELOG.md
+          
+          # Mover CHANGELOG.md al directorio workspace
+          mv CHANGELOG.md ..
+          
+          # Remover .git nuevamente
+          cd ..
+          mv kernel-src/.git kernel-git-backup
+          
           echo "✅ CHANGELOG.md generated successfully"
           ls -lh CHANGELOG.md
 
@@ -666,78 +698,38 @@ jobs:
         run: |
           mkdir -p release
           
-          echo "🔍 Locating .deb files..."
-          echo "Current directory: $(pwd)"
-          echo ""
+          echo "🔍 Collecting release files..."
+          echo "Working directory: $(pwd)"
           
-          # Buscar en múltiples ubicaciones posibles
-          DEB_FOUND=0
-          
-          # Opción 1: En /tmp/ directamente
+          # Los .deb se generan en /tmp/ debido al tmpfs
           if ls /tmp/*.deb 1> /dev/null 2>&1; then
-            echo "✅ Found .deb files in /tmp/"
             cp /tmp/*.deb release/
-            DEB_FOUND=1
-          # Opción 2: En el workspace actual
-          elif ls *.deb 1> /dev/null 2>&1; then
-            echo "✅ Found .deb files in current directory"
-            cp *.deb release/
-            DEB_FOUND=1
-          # Opción 3: Buscar recursivamente en /tmp/kernel-build y alrededores
+            DEB_COUNT=$(ls release/*.deb 2>/dev/null | wc -l)
+            echo "✅ Copied $DEB_COUNT .deb package(s)"
           else
-            echo "⚠️  Searching recursively..."
-            FOUND_DEBS=$(find /tmp -maxdepth 2 -name "*.deb" -type f 2>/dev/null | grep -E "linux-(image|headers|libc-dev)")
-            
-            if [ -n "$FOUND_DEBS" ]; then
-              echo "✅ Found .deb files:"
-              echo "$FOUND_DEBS"
-              echo "$FOUND_DEBS" | xargs -I {} cp {} release/
-              DEB_FOUND=1
-            fi
-          fi
-          
-          if [ $DEB_FOUND -eq 0 ]; then
-            echo ""
-            echo "❌ ERROR: No .deb files found!"
-            echo ""
-            echo "=== Full diagnostic search ==="
-            echo "1. Current directory: $(pwd)"
-            ls -la *.deb 2>/dev/null || echo "   No .deb here"
-            echo ""
-            echo "2. /tmp/ directory:"
-            ls -la /tmp/*.deb 2>/dev/null || echo "   No .deb here"
-            echo ""
-            echo "3. /tmp/kernel-build/ parent:"
-            ls -la /tmp/kernel-build/../*.deb 2>/dev/null || echo "   No .deb here"
-            echo ""
-            echo "4. Recursive search in /tmp (max depth 3):"
-            find /tmp -maxdepth 3 -name "*.deb" -type f 2>/dev/null | head -20 || echo "   No .deb found"
-            echo ""
-            echo "5. Check kernel-src symlink target:"
-            ls -la kernel-src
-            readlink -f kernel-src
-            echo ""
+            echo "❌ ERROR: No .deb files found in /tmp/"
             exit 1
           fi
           
-          DEB_COUNT=$(ls release/*.deb 2>/dev/null | wc -l)
-          echo "✅ Copied $DEB_COUNT .deb package(s) to release/"
-          
-          # Copiar archivos adicionales
-          if [ -f CHANGELOG.md ]; then
-            cp CHANGELOG.md release/
+          # Copiar CHANGELOG.md desde workspace root
+          if [ -f "$GITHUB_WORKSPACE/CHANGELOG.md" ]; then
+            cp "$GITHUB_WORKSPACE/CHANGELOG.md" release/
             echo "✅ Copied CHANGELOG.md"
           else
-            echo "⚠️  CHANGELOG.md not found, skipping"
+            echo "❌ ERROR: CHANGELOG.md not found in workspace"
+            ls -la "$GITHUB_WORKSPACE/" | grep -i changelog || echo "No CHANGELOG found"
+            exit 1
           fi
           
-          if [ -f build-metrics.txt ]; then
-            cp build-metrics.txt release/
+          # Copiar build-metrics.txt desde workspace root
+          if [ -f "$GITHUB_WORKSPACE/build-metrics.txt" ]; then
+            cp "$GITHUB_WORKSPACE/build-metrics.txt" release/
             echo "✅ Copied build-metrics.txt"
           else
-            echo "⚠️  build-metrics.txt not found, skipping"
+            echo "⚠️  Warning: build-metrics.txt not found, skipping"
           fi
           
+          # Generar checksums
           cd release
           sha256sum *.deb > SHA256SUMS.txt
           
