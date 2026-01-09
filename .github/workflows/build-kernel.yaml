@@ -622,74 +622,169 @@ jobs:
 
       - name: Generate CHANGELOG
         run: |
-          # Restaurar temporalmente .git para el changelog
-          if [ -d kernel-git-backup ]; then
-            mv kernel-git-backup kernel-src/.git
+          echo "=========================================="
+          echo "GENERATING CHANGELOG"
+          echo "=========================================="
+          echo "Current directory: $(pwd)"
+          echo "Workspace: $GITHUB_WORKSPACE"
+          echo ""
+          
+          # Debug: Mostrar estructura de directorios
+          echo "📂 Directory structure:"
+          echo "Workspace contents:"
+          ls -la "$GITHUB_WORKSPACE/" | head -20
+          echo ""
+          echo "kernel-src type:"
+          file "$GITHUB_WORKSPACE/kernel-src" || echo "kernel-src not found"
+          echo ""
+          
+          # Verificar que existe kernel-git-backup
+          if [ -d "$GITHUB_WORKSPACE/kernel-git-backup" ]; then
+            echo "✅ Found kernel-git-backup at: $GITHUB_WORKSPACE/kernel-git-backup"
+            echo "   Size: $(du -sh "$GITHUB_WORKSPACE/kernel-git-backup" 2>/dev/null | cut -f1)"
+            
+            # Copiar .git a un directorio temporal EN EL WORKSPACE (no en /tmp)
+            echo ""
+            echo "📦 Creating temporary git directory..."
+            TEMP_GIT_DIR="$GITHUB_WORKSPACE/temp-git-for-changelog"
+            mkdir -p "$TEMP_GIT_DIR"
+            
+            # Copiar .git
+            cp -r "$GITHUB_WORKSPACE/kernel-git-backup" "$TEMP_GIT_DIR/.git"
+            
+            cd "$TEMP_GIT_DIR"
+            echo "Working from: $(pwd)"
+            
+            # Generar CHANGELOG directamente en el workspace usando ruta absoluta
+            echo ""
+            echo "📝 Generating CHANGELOG with git history..."
+            {
+              echo "# Linux Kernel ${{ env.KERNEL_VERSION }} - Build Release"
+              echo ""
+              echo "## Build Information"
+              echo ""
+              echo "- **Kernel Version:** ${{ env.KERNEL_VERSION }}"
+              echo "- **Build Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+              echo "- **Build Time:** $((${{ env.BUILD_TIME }} / 60)) minutes $((${{ env.BUILD_TIME }} % 60)) seconds"
+              echo "- **Toolchain:** ${{ env.COMPILER }} + ${{ env.LINKER }}"
+              if [ "${{ env.COMPILER }}" = "gcc" ]; then
+                echo "- **Target Platform:** Intel x5-Z8300 (Silvermont)"
+                echo "- **Compiler Flags:** -march=silvermont -mtune=silvermont"
+              else
+                echo "- **Target Platform:** x86-64-v2 (generic)"
+                echo "- **Compiler Flags:** -march=x86-64-v2 -mtune=generic"
+              fi
+              echo ""
+              echo "## Installation"
+              echo ""
+              echo "\`\`\`bash"
+              echo "# Download all .deb files"
+              echo "# Install with:"
+              echo "sudo dpkg -i linux-*.deb"
+              echo ""
+              echo "# Reboot to use the new kernel"
+              echo "sudo reboot"
+              echo "\`\`\`"
+              echo ""
+              echo "## Package Contents"
+              echo ""
+              echo "- \`linux-image-*\` - Kernel image"
+              echo "- \`linux-headers-*\` - Kernel headers for module compilation"
+              echo "- \`linux-libc-dev-*\` - Kernel headers for userspace"
+              echo ""
+              echo "## Recent Kernel Changes (Last 30 commits)"
+              echo ""
+              git log --reverse -n 30 --pretty=format:"- \`%h\` %s (%an, %ar)" 2>/dev/null || echo "- No git history available"
+              echo ""
+              echo ""
+              echo "## Verification"
+              echo ""
+              echo "All packages are checksummed in \`SHA256SUMS.txt\`. Verify with:"
+              echo ""
+              echo "\`\`\`bash"
+              echo "sha256sum -c SHA256SUMS.txt"
+              echo "\`\`\`"
+            } > "$GITHUB_WORKSPACE/CHANGELOG.md"
+            
+            # Limpiar directorio temporal
+            cd "$GITHUB_WORKSPACE"
+            rm -rf "$TEMP_GIT_DIR"
+            echo "✅ Cleaned up temporary git directory"
+            
+          else
+            echo "⚠️  kernel-git-backup not found at: $GITHUB_WORKSPACE/kernel-git-backup"
+            echo "Generating CHANGELOG without git history..."
+            
+            # Generar CHANGELOG sin historial git
+            {
+              echo "# Linux Kernel ${{ env.KERNEL_VERSION }} - Build Release"
+              echo ""
+              echo "## Build Information"
+              echo ""
+              echo "- **Kernel Version:** ${{ env.KERNEL_VERSION }}"
+              echo "- **Build Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+              echo "- **Build Time:** $((${{ env.BUILD_TIME }} / 60)) minutes $((${{ env.BUILD_TIME }} % 60)) seconds"
+              echo "- **Toolchain:** ${{ env.COMPILER }} + ${{ env.LINKER }}"
+              if [ "${{ env.COMPILER }}" = "gcc" ]; then
+                echo "- **Target Platform:** Intel x5-Z8300 (Silvermont)"
+                echo "- **Compiler Flags:** -march=silvermont -mtune=silvermont"
+              else
+                echo "- **Target Platform:** x86-64-v2 (generic)"
+                echo "- **Compiler Flags:** -march=x86-64-v2 -mtune=generic"
+              fi
+              echo ""
+              echo "## Installation"
+              echo ""
+              echo "\`\`\`bash"
+              echo "# Download all .deb files"
+              echo "# Install with:"
+              echo "sudo dpkg -i linux-*.deb"
+              echo ""
+              echo "# Reboot to use the new kernel"
+              echo "sudo reboot"
+              echo "\`\`\`"
+              echo ""
+              echo "## Package Contents"
+              echo ""
+              echo "- \`linux-image-*\` - Kernel image"
+              echo "- \`linux-headers-*\` - Kernel headers for module compilation"
+              echo "- \`linux-libc-dev-*\` - Kernel headers for userspace"
+              echo ""
+              echo "## Verification"
+              echo ""
+              echo "All packages are checksummed in \`SHA256SUMS.txt\`. Verify with:"
+              echo ""
+              echo "\`\`\`bash"
+              echo "sha256sum -c SHA256SUMS.txt"
+              echo "\`\`\`"
+            } > "$GITHUB_WORKSPACE/CHANGELOG.md"
           fi
           
-          cd kernel-src
-          {
-            echo "# Linux Kernel ${{ env.KERNEL_VERSION }} - Build Release"
-            echo ""
-            echo "## Build Information"
-            echo ""
-            echo "- **Kernel Version:** ${{ env.KERNEL_VERSION }}"
-            echo "- **Build Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
-            echo "- **Build Time:** $((${{ env.BUILD_TIME }} / 60)) minutes $((${{ env.BUILD_TIME }} % 60)) seconds"
-            echo "- **Toolchain:** ${{ env.COMPILER }} + ${{ env.LINKER }}"
-            if [ "${{ env.COMPILER }}" = "gcc" ]; then
-              echo "- **Target Platform:** Intel x5-Z8300 (Silvermont)"
-              echo "- **Compiler Flags:** -march=silvermont -mtune=silvermont"
-            else
-              echo "- **Target Platform:** x86-64-v2 (generic)"
-              echo "- **Compiler Flags:** -march=x86-64-v2 -mtune=generic"
-            fi
-            echo ""
-            echo "## Installation"
-            echo ""
-            echo "\`\`\`bash"
-            echo "# Download all .deb files"
-            echo "# Install with:"
-            echo "sudo dpkg -i linux-*.deb"
-            echo ""
-            echo "# Reboot to use the new kernel"
-            echo "sudo reboot"
-            echo "\`\`\`"
-            echo ""
-            echo "## Package Contents"
-            echo ""
-            echo "- \`linux-image-*\` - Kernel image"
-            echo "- \`linux-headers-*\` - Kernel headers for module compilation"
-            echo "- \`linux-libc-dev-*\` - Kernel headers for userspace"
-            echo ""
-            echo "## Recent Kernel Changes (Last 30 commits)"
-            echo ""
-            git log --reverse -n 30 --pretty=format:"- \`%h\` %s (%an, %ar)" || echo "No git history available"
-            echo ""
-            echo ""
-            echo "## Verification"
-            echo ""
-            echo "All packages are checksummed in \`SHA256SUMS.txt\`. Verify with:"
-            echo ""
-            echo "\`\`\`bash"
-            echo "sha256sum -c SHA256SUMS.txt"
-            echo "\`\`\`"
-          } > ../CHANGELOG.md
+          echo ""
+          echo "=========================================="
+          echo "VERIFYING CHANGELOG"
+          echo "=========================================="
           
-          cd ..
-          
-          # Verificar que CHANGELOG.md existe en el lugar correcto
-          if [ -f CHANGELOG.md ]; then
-            echo "✅ CHANGELOG.md generated successfully at $(pwd)/CHANGELOG.md"
-            ls -lh CHANGELOG.md
+          # Verificar que CHANGELOG.md existe
+          if [ -f "$GITHUB_WORKSPACE/CHANGELOG.md" ]; then
+            echo "✅ CHANGELOG.md generated successfully!"
+            echo "   Location: $GITHUB_WORKSPACE/CHANGELOG.md"
+            echo "   Size: $(wc -l < "$GITHUB_WORKSPACE/CHANGELOG.md") lines"
+            echo "   File size: $(du -h "$GITHUB_WORKSPACE/CHANGELOG.md" | cut -f1)"
+            echo ""
+            echo "First 10 lines:"
+            head -10 "$GITHUB_WORKSPACE/CHANGELOG.md"
+            echo "=========================================="
           else
             echo "❌ ERROR: CHANGELOG.md not found!"
+            echo "   Expected location: $GITHUB_WORKSPACE/CHANGELOG.md"
+            echo ""
+            echo "Searching for CHANGELOG.md in workspace..."
+            find "$GITHUB_WORKSPACE" -name "CHANGELOG.md" -type f 2>/dev/null || echo "No CHANGELOG.md found anywhere"
+            echo ""
+            echo "Contents of workspace root:"
+            ls -la "$GITHUB_WORKSPACE/"
             exit 1
-          fi
-          
-          # Remover .git nuevamente
-          if [ -L kernel-src ] && [ -d kernel-src/.git ]; then
-            mv kernel-src/.git kernel-git-backup
           fi
 
       - name: Collect release files
