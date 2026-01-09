@@ -56,106 +56,7 @@ jobs:
           sudo mount -t tmpfs -o size=$TMPFS_SIZE tmpfs /tmp/kernel-build
           sudo chown -R $USER:$USER /tmp/kernel-build
           
-          echo "✅ CHANGELOG.md generated successfully"
-          ls -lh "$GITHUB_WORKSPACE/CHANGELOG.md"
-
-      - name: Collect release files
-        run: |
-          mkdir -p release
-          
-          echo "🔍 Collecting release files..."
-          echo "Working directory: $(pwd)"
-          
-          # Los .deb se generan en /tmp/ debido al tmpfs
-          if ls /tmp/*.deb 1> /dev/null 2>&1; then
-            cp /tmp/*.deb release/
-            DEB_COUNT=$(ls release/*.deb 2>/dev/null | wc -l)
-            echo "✅ Copied $DEB_COUNT .deb package(s)"
-          else
-            echo "❌ ERROR: No .deb files found in /tmp/"
-            exit 1
-          fi
-          
-          # Copiar CHANGELOG.md desde workspace root
-          if [ -f "$GITHUB_WORKSPACE/CHANGELOG.md" ]; then
-            cp "$GITHUB_WORKSPACE/CHANGELOG.md" release/
-            echo "✅ Copied CHANGELOG.md"
-          else
-            echo "❌ ERROR: CHANGELOG.md not found in workspace"
-            ls -la "$GITHUB_WORKSPACE/" | grep -i changelog || echo "No CHANGELOG found"
-            exit 1
-          fi
-          
-          # Copiar build-metrics.txt desde workspace root
-          if [ -f "$GITHUB_WORKSPACE/build-metrics.txt" ]; then
-            cp "$GITHUB_WORKSPACE/build-metrics.txt" release/
-            echo "✅ Copied build-metrics.txt"
-          else
-            echo "⚠️  Warning: build-metrics.txt not found, skipping"
-          fi
-          
-          # Generar checksums
-          cd release
-          sha256sum *.deb > SHA256SUMS.txt
-          
-          echo ""
-          echo "=========================================="
-          echo "RELEASE FILES PREPARED"
-          echo "=========================================="
-          ls -lh
-          echo ""
-          echo "📋 Checksums:"
-          cat SHA256SUMS.txt
-          echo "=========================================="
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: kernel-${{ env.KERNEL_VERSION }}-build-${{ github.run_number }}
-          path: |
-            release/*.deb
-            release/*.txt
-            release/*.md
-            kernel-src/build.log
-            
-      - name: Create or Update GitHub Release
-        run: |
-          echo "=========================================="
-          echo "CREATING RELEASE"
-          echo "=========================================="
-          echo "Tag: ${{ env.RELEASE_TAG }}"
-          echo ""
-          
-          gh release create "${{ env.RELEASE_TAG }}" \
-            release/*.deb \
-            release/SHA256SUMS.txt \
-            release/build-metrics.txt \
-            --title "Linux Kernel ${{ env.KERNEL_VERSION }}" \
-            --notes-file release/CHANGELOG.md \
-            --latest
-          
-          echo ""
-          echo "✅ Release created successfully!"
-          echo "=========================================="
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-
-      - name: Build summary
-        if: always()
-        run: |
-          echo "=========================================="
-          echo "🎉 WORKFLOW COMPLETED"
-          echo "=========================================="
-          echo "Kernel Version: ${{ env.KERNEL_VERSION }}"
-          echo "Release Tag: ${{ env.RELEASE_TAG }}"
-          echo "Toolchain: ${{ env.COMPILER }} + ${{ env.LINKER }}"
-          echo "Build Time: $((${{ env.BUILD_TIME }} / 60))m $((${{ env.BUILD_TIME }} % 60))s"
-          echo ""
-          echo "📦 Release URL:"
-          echo "https://github.com/${{ github.repository }}/releases/tag/${{ env.RELEASE_TAG }}"
-          echo "==========================================" tmpfs mounted at /tmp/kernel-build (${TMPFS_SIZE})"
+          echo "✅ tmpfs mounted at /tmp/kernel-build (${TMPFS_SIZE})"
           df -h /tmp/kernel-build
           
           echo ""
@@ -333,7 +234,7 @@ jobs:
         id: ccache-restore
         with:
           path: ~/.ccache
-          key: ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ github.run_number }}
+          key: ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ github.run_id }}
           restore-keys: |
             ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-
             ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR }}.
@@ -387,7 +288,6 @@ jobs:
               FILES=$(find ~/.ccache -type f 2>/dev/null | wc -l)
               echo "   📦 Size: $SIZE ($FILES files)"
               
-              # Verificar que ccache tiene contenido útil
               OBJECTS=$(find ~/.ccache -name "*.o" 2>/dev/null | wc -l)
               echo "   🔍 Cached objects: $OBJECTS"
             fi
@@ -397,10 +297,11 @@ jobs:
           echo ""
           
           echo "2️⃣  KERNEL .CONFIG (compiler-specific):"
-          if [ -f kernel-src/.config ]; then
-            echo "   ✅ RESTORED: Cached .config found for ${{ env.COMPILER }}"
-            echo "   📅 Timestamp: $(stat -c %y kernel-src/.config 2>/dev/null || stat -f %Sm kernel-src/.config)"
-            echo "   🎯 This PRESERVES timestamps for optimal ccache performance!"
+          if [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
+            echo "   ✅ RESTORED: Cached .config for ${{ env.COMPILER }}"
+            if [ -f kernel-src/.config ]; then
+              echo "   📅 Timestamp: $(stat -c %y kernel-src/.config 2>/dev/null || stat -f %Sm kernel-src/.config)"
+            fi
           else
             echo "   ⚠️  WILL GENERATE: Fresh .config from defconfig for ${{ env.COMPILER }}"
             echo "   ⚠️  This WILL invalidate ccache entries (timestamps change)"
@@ -415,10 +316,10 @@ jobs:
           fi
           echo ""
           
-          if [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ] && [ -f kernel-src/.config ]; then
-            echo "⚡ EXCELLENT! Both ccache AND .config cached - Build should take ~10-15 minutes"
+          if [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ] && [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
+            echo "⚡ EXCELLENT! Cache + Config cached - Build should take ~10-15 minutes"
           elif [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ]; then
-            echo "⚠️  WARNING: Ccache available BUT config will be regenerated"
+            echo "⚠️  WARNING: Cache available BUT config will be regenerated"
             echo "   This changes .config timestamps and invalidates most ccache entries"
             echo "   Expected build time: ~40-50 minutes (almost like no cache)"
             echo "💡 Next build will be fast once .config is cached"
@@ -459,10 +360,8 @@ jobs:
         run: |
           echo "🔧 Configuring kernel for ${{ env.COMPILER }}..."
           
-          # CRÍTICO: Solo regenerar .config si NO está cacheado
-          if [ -f .config ]; then
+          if [ -f .config ] && [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
             echo "✅ Using cached .config for ${{ env.COMPILER }} (preserves timestamps for ccache)"
-            echo "   This is CRITICAL for ccache performance!"
             make -s olddefconfig
           else
             echo "⚙️  Generating fresh config from defconfig for ${{ env.COMPILER }}"
@@ -507,7 +406,7 @@ jobs:
           echo ""
           echo "=== Configuration summary ==="
           echo "Config used: acer_sw1_011_defconfig"
-          echo "Config from cache: $([ -f .config ] && echo 'YES (timestamps preserved)' || echo 'NO (newly generated)')"
+          echo "Config cached: ${{ steps.config-restore.outputs.cache-hit }}"
           echo "Compiler: ${{ env.COMPILER }}"
           echo "Linker: ${{ env.LINKER }}"
           echo "Debug info: disabled"
@@ -674,10 +573,10 @@ jobs:
 
       - name: Save ccache
         uses: actions/cache/save@v5
-        if: always() && steps.ccache-restore.outputs.cache-hit != 'true'
+        if: always()
         with:
           path: ~/.ccache
-          key: ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ github.run_number }}
+          key: ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ github.run_id }}
 
       - name: Save kernel build tools
         uses: actions/cache/save@v5
@@ -724,7 +623,9 @@ jobs:
       - name: Generate CHANGELOG
         run: |
           # Restaurar temporalmente .git para el changelog
-          mv kernel-git-backup kernel-src/.git
+          if [ -d kernel-git-backup ]; then
+            mv kernel-git-backup kernel-src/.git
+          fi
           
           cd kernel-src
           {
@@ -773,15 +674,24 @@ jobs:
             echo "\`\`\`bash"
             echo "sha256sum -c SHA256SUMS.txt"
             echo "\`\`\`"
-          } > "$GITHUB_WORKSPACE/CHANGELOG.md"
+          } > ../CHANGELOG.md
+          
+          cd ..
+          
+          # Verificar que CHANGELOG.md existe en el lugar correcto
+          if [ -f CHANGELOG.md ]; then
+            echo "✅ CHANGELOG.md generated successfully at $(pwd)/CHANGELOG.md"
+            ls -lh CHANGELOG.md
+          else
+            echo "❌ ERROR: CHANGELOG.md not found!"
+            exit 1
+          fi
           
           # Remover .git nuevamente
-          cd "$GITHUB_WORKSPACE"
-          mv kernel-src/.git kernel-git-backup
-          
-          echo "✅ CHANGELOG.md generated successfully"
-          ls -lh "$GITHUB_WORKSPACE/CHANGELOG.md"
-          
+          if [ -L kernel-src ] && [ -d kernel-src/.git ]; then
+            mv kernel-src/.git kernel-git-backup
+          fi
+
       - name: Collect release files
         run: |
           mkdir -p release
@@ -805,7 +715,8 @@ jobs:
             echo "✅ Copied CHANGELOG.md"
           else
             echo "❌ ERROR: CHANGELOG.md not found in workspace"
-            ls -la "$GITHUB_WORKSPACE/" | grep -i changelog || echo "No CHANGELOG found"
+            echo "Searching for CHANGELOG.md..."
+            find "$GITHUB_WORKSPACE" -name "CHANGELOG.md" -type f 2>/dev/null || echo "No CHANGELOG found anywhere"
             exit 1
           fi
           
@@ -830,7 +741,7 @@ jobs:
           echo "📋 Checksums:"
           cat SHA256SUMS.txt
           echo "=========================================="
-    
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         if: always()
@@ -864,7 +775,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-    
+
       - name: Build summary
         if: always()
         run: |
