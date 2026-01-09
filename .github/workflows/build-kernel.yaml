@@ -663,10 +663,17 @@ jobs:
             echo "\`\`\`bash"
             echo "sha256sum -c SHA256SUMS.txt"
             echo "\`\`\`"
-          } > ../CHANGELOG.md
+          } > CHANGELOG.md
           
+          # Mover CHANGELOG.md al directorio workspace
+          mv CHANGELOG.md ..
+          
+          # Remover .git nuevamente
           cd ..
           mv kernel-src/.git kernel-git-backup
+          
+          echo "✅ CHANGELOG.md generated successfully"
+          ls -lh CHANGELOG.md
 
       - name: Collect release files
         run: |
@@ -729,8 +736,20 @@ jobs:
           DEB_COUNT=$(ls release/*.deb 2>/dev/null | wc -l)
           echo "✅ Copied $DEB_COUNT .deb package(s) to release/"
           
-          cp CHANGELOG.md release/
-          cp build-metrics.txt release/
+          # Copiar archivos adicionales
+          if [ -f CHANGELOG.md ]; then
+            cp CHANGELOG.md release/
+            echo "✅ Copied CHANGELOG.md"
+          else
+            echo "⚠️  CHANGELOG.md not found, skipping"
+          fi
+          
+          if [ -f build-metrics.txt ]; then
+            cp build-metrics.txt release/
+            echo "✅ Copied build-metrics.txt"
+          else
+            echo "⚠️  build-metrics.txt not found, skipping"
+          fi
           
           cd release
           sha256sum *.deb > SHA256SUMS.txt
