@@ -558,13 +558,6 @@ jobs:
           echo "💾 Final cache size: $FINAL_SIZE"
           echo "=========================================="
 
-      - name: Save ccache
-        uses: actions/cache/save@v5
-        if: always()
-        with:
-          path: ~/.ccache
-          key: ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
-
       - name: Save kernel build tools
         uses: actions/cache/save@v5
         if: always() && steps.kernel-tools-restore.outputs.cache-hit != 'true'
@@ -582,6 +575,13 @@ jobs:
         with:
           path: kernel-src/.config
           key: config-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig') }}
+
+      - name: Save ccache
+        uses: actions/cache/save@v5
+        if: always()
+        with:
+          path: ~/.ccache
+          key: ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
 
       - name: Save build metrics
         if: always()
@@ -659,9 +659,6 @@ jobs:
             echo "sha256sum -c SHA256SUMS.txt"
             echo "\`\`\`"
           } > CHANGELOG.md
-          
-          # Mover CHANGELOG.md al directorio workspace
-          mv CHANGELOG.md ..
           echo "✅ CHANGELOG.md generated successfully"
           ls -lh CHANGELOG.md
 
