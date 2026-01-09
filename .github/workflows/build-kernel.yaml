@@ -676,28 +676,58 @@ jobs:
           echo "Current directory: $(pwd)"
           echo ""
           
+          # Buscar en múltiples ubicaciones posibles
+          DEB_FOUND=0
+          
+          # Opción 1: En /tmp/ directamente
           if ls /tmp/*.deb 1> /dev/null 2>&1; then
             echo "✅ Found .deb files in /tmp/"
             cp /tmp/*.deb release/
-            DEB_COUNT=$(ls /tmp/*.deb | wc -l)
-            echo "✅ Copied $DEB_COUNT .deb package(s)"
+            DEB_FOUND=1
+          # Opción 2: En el workspace actual
           elif ls *.deb 1> /dev/null 2>&1; then
             echo "✅ Found .deb files in current directory"
             cp *.deb release/
-            DEB_COUNT=$(ls *.deb | wc -l)
-            echo "✅ Copied $DEB_COUNT .deb package(s)"
+            DEB_FOUND=1
+          # Opción 3: Buscar recursivamente en /tmp/kernel-build y alrededores
           else
+            echo "⚠️  Searching recursively..."
+            FOUND_DEBS=$(find /tmp -maxdepth 2 -name "*.deb" -type f 2>/dev/null | grep -E "linux-(image|headers|libc-dev)")
+            
+            if [ -n "$FOUND_DEBS" ]; then
+              echo "✅ Found .deb files:"
+              echo "$FOUND_DEBS"
+              echo "$FOUND_DEBS" | xargs -I {} cp {} release/
+              DEB_FOUND=1
+            fi
+          fi
+          
+          if [ $DEB_FOUND -eq 0 ]; then
+            echo ""
             echo "❌ ERROR: No .deb files found!"
             echo ""
-            echo "Searching in common locations:"
-            echo "- Current dir: $(pwd)"
-            ls -la *.deb 2>/dev/null || echo "  No .deb here"
-            echo "- /tmp/:"
-            ls -la /tmp/*.deb 2>/dev/null || echo "  No .deb here"
-            echo "- /tmp/kernel-build/..:"
-            ls -la /tmp/kernel-build/../*.deb 2>/dev/null || echo "  No .deb here"
+            echo "=== Full diagnostic search ==="
+            echo "1. Current directory: $(pwd)"
+            ls -la *.deb 2>/dev/null || echo "   No .deb here"
+            echo ""
+            echo "2. /tmp/ directory:"
+            ls -la /tmp/*.deb 2>/dev/null || echo "   No .deb here"
+            echo ""
+            echo "3. /tmp/kernel-build/ parent:"
+            ls -la /tmp/kernel-build/../*.deb 2>/dev/null || echo "   No .deb here"
+            echo ""
+            echo "4. Recursive search in /tmp (max depth 3):"
+            find /tmp -maxdepth 3 -name "*.deb" -type f 2>/dev/null | head -20 || echo "   No .deb found"
+            echo ""
+            echo "5. Check kernel-src symlink target:"
+            ls -la kernel-src
+            readlink -f kernel-src
+            echo ""
             exit 1
           fi
+          
+          DEB_COUNT=$(ls release/*.deb 2>/dev/null | wc -l)
+          echo "✅ Copied $DEB_COUNT .deb package(s) to release/"
           
           cp CHANGELOG.md release/
           cp build-metrics.txt release/
