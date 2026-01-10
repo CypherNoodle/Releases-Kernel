@@ -152,9 +152,19 @@ jobs:
           if gh release view "${{ env.RELEASE_TAG }}" > /dev/null 2>&1; then
             echo "exists=true" >> $GITHUB_OUTPUT
             echo "⚠️  Release ${{ env.RELEASE_TAG }} already exists!"
-            echo "Existing assets will be replaced with new build."
+            
+            # Determinar si debemos eliminar basado en prerelease
+            PRERELEASE="${{ github.event.inputs.prerelease }}"
+            if [ "$PRERELEASE" = "true" ]; then
+              echo "action=skip" >> $GITHUB_OUTPUT
+              echo "✅ Creating as prerelease - will NOT delete existing stable release"
+            else
+              echo "action=delete" >> $GITHUB_OUTPUT
+              echo "⚠️  Creating stable release - existing release will be replaced"
+            fi
           else
             echo "exists=false" >> $GITHUB_OUTPUT
+            echo "action=create" >> $GITHUB_OUTPUT
             echo "✅ Release ${{ env.RELEASE_TAG }} will be created."
           fi
         env:
@@ -162,9 +172,9 @@ jobs:
           GH_REPO: ${{ github.repository }}
 
       - name: Delete old release assets
-        if: steps.check_release.outputs.exists == 'true'
+        if: steps.check_release.outputs.action == 'delete'
         run: |
-          echo "🗑️  Deleting old assets from release ${{ env.RELEASE_TAG }}..."
+          echo "🗑️  Deleting old release ${{ env.RELEASE_TAG }}..."
           
           gh release delete "${{ env.RELEASE_TAG }}" --yes --cleanup-tag 2>/dev/null || true
           
@@ -362,7 +372,41 @@ jobs:
           
           if [ -f .config ] && [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
             echo "✅ Using cached .config for ${{ env.COMPILER }} (preserves timestamps for ccache)"
-            make -s olddefconfig
+            echo "   Skipping olddefconfig to preserve cache validity"
+            
+            # Solo verificar que el .config es válido
+            if ! make -s listnewconfig | grep -q '^CONFIG'; then
+              echo "   ✅ No new config options - cache is valid"
+            else
+              echo "   ⚠️  New config options detected:"
+              make -s listnewconfig | head -10
+              echo ""
+              echo "   ℹ️  Note: If you see Clang options here, consider adding them to acer_sw1_011_defconfig"
+              
+              # Solo para Clang: configurar nuevas opciones de forma no-interactiva
+              if [ "${{ env.COMPILER }}" = "clang" ]; then
+                echo "   ⚙️  Configuring new Clang options (non-interactive)..."
+                
+                # Configurar solo las opciones nuevas que puedan aparecer
+                # Nota: Si estas opciones ya están en tu defconfig, esto no hace nada
+                scripts/config --disable CONFIG_LTO_CLANG 2>/dev/null || true
+                scripts/config --disable CONFIG_LTO_CLANG_THIN 2>/dev/null || true
+                scripts/config --disable CONFIG_LTO_CLANG_FULL 2>/dev/null || true
+                scripts/config --disable CONFIG_CFI_CLANG 2>/dev/null || true
+                scripts/config --disable CONFIG_AUTOFDO_CLANG 2>/dev/null || true
+                scripts/config --set-val CONFIG_LTO_NONE y 2>/dev/null || true
+                scripts/config --disable CONFIG_KMSAN 2>/dev/null || true
+                scripts/config --set-val CONFIG_RANDSTRUCT_NONE y 2>/dev/null || true
+                
+                # Aplicar configuración con valores default para el resto
+                yes "" | make oldconfig > /dev/null 2>&1 || true
+                
+                echo "   ⚠️  WARNING: Cache may be partially invalidated due to new options"
+              else
+                # Para GCC: solo aplicar defaults sin regenerar todo
+                yes "" | make oldconfig > /dev/null 2>&1 || true
+              fi
+            fi
           else
             echo "⚙️  Generating fresh config from defconfig for ${{ env.COMPILER }}"
             
@@ -379,6 +423,7 @@ jobs:
             echo ""
             echo "⚙️  Applying build optimizations..."
             
+            # Opciones generales de debug/optimización
             scripts/config --disable CONFIG_DEBUG_INFO
             scripts/config --disable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
             scripts/config --disable CONFIG_DEBUG_INFO_DWARF4
@@ -392,14 +437,26 @@ jobs:
             scripts/config --disable CONFIG_GCOV_KERNEL
             scripts/config --disable CONFIG_KCOV
             
+            # Opciones de Clang (fallback si no están en defconfig)
+            # Si ya están en tu defconfig, esto no hace nada y es redundante
             if [ "${{ env.COMPILER }}" = "clang" ]; then
-              echo "⚙️  Disabling LTO for Clang (avoids build issues)..."
-              scripts/config --disable CONFIG_LTO_CLANG
-              scripts/config --disable CONFIG_LTO_CLANG_THIN
-              scripts/config --disable CONFIG_LTO_CLANG_FULL
-              scripts/config --disable CONFIG_CFI_CLANG
+              echo "⚙️  Verifying Clang-specific options..."
+              
+              # Estas líneas son redundantes si ya están en tu defconfig
+              # Pero no hacen daño y sirven como fallback
+              scripts/config --disable CONFIG_LTO_CLANG 2>/dev/null || true
+              scripts/config --disable CONFIG_LTO_CLANG_THIN 2>/dev/null || true
+              scripts/config --disable CONFIG_LTO_CLANG_FULL 2>/dev/null || true
+              scripts/config --set-val CONFIG_LTO_NONE y 2>/dev/null || true
+              scripts/config --disable CONFIG_CFI_CLANG 2>/dev/null || true
+              scripts/config --disable CONFIG_AUTOFDO_CLANG 2>/dev/null || true
+              scripts/config --disable CONFIG_KMSAN 2>/dev/null || true
+              scripts/config --set-val CONFIG_RANDSTRUCT_NONE y 2>/dev/null || true
             fi
             
+            # Finalizar configuración de forma no-interactiva
+            echo "⚙️  Finalizing configuration (non-interactive)..."
+            yes "" | make oldconfig > /dev/null 2>&1 || true
             make -s olddefconfig
           fi
           
@@ -413,7 +470,11 @@ jobs:
           echo "Localversion auto: disabled"
           if [ "${{ env.COMPILER }}" = "clang" ]; then
             echo "Optimization: x86-64-v2 (generic optimization)"
-            echo "LTO: disabled (for stability)"
+            echo "LTO: disabled (from defconfig)"
+            echo "CFI: disabled (from defconfig)"
+            echo "AutoFDO: disabled (from defconfig)"
+            echo "KMSAN: disabled (from defconfig)"
+            echo "RANDSTRUCT: none (from defconfig)"
           else
             echo "Optimization: Intel x5-Z8300 (Silvermont)"
           fi
@@ -854,15 +915,42 @@ jobs:
           echo "CREATING RELEASE"
           echo "=========================================="
           echo "Tag: ${{ env.RELEASE_TAG }}"
+          
+          # Determinar si es prerelease
+          PRERELEASE_FLAG=""
+          if [ "${{ github.event.inputs.prerelease }}" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+            echo "Type: Pre-release"
+            RELEASE_TITLE="Linux Kernel ${{ env.KERNEL_VERSION }} (Pre-release)"
+          else
+            PRERELEASE_FLAG="--latest"
+            echo "Type: Stable release"
+            RELEASE_TITLE="Linux Kernel ${{ env.KERNEL_VERSION }}"
+          fi
           echo ""
           
-          gh release create "${{ env.RELEASE_TAG }}" \
-            release/*.deb \
-            release/SHA256SUMS.txt \
-            release/build-metrics.txt \
-            --title "Linux Kernel ${{ env.KERNEL_VERSION }}" \
-            --notes-file release/CHANGELOG.md \
-            --latest
+          # Si ya existe y es prerelease, crear con sufijo diferente
+          if [ "${{ steps.check_release.outputs.exists }}" = "true" ] && [ "${{ github.event.inputs.prerelease }}" = "true" ]; then
+            # Agregar sufijo al tag para prerelease
+            PRERELEASE_TAG="${{ env.RELEASE_TAG }}-pre-${{ github.run_number }}"
+            echo "⚠️  Stable release exists, creating prerelease with tag: $PRERELEASE_TAG"
+            
+            gh release create "$PRERELEASE_TAG" \
+              release/*.deb \
+              release/SHA256SUMS.txt \
+              release/build-metrics.txt \
+              --title "$RELEASE_TITLE (Build #${{ github.run_number }})" \
+              --notes-file release/CHANGELOG.md \
+              $PRERELEASE_FLAG
+          else
+            gh release create "${{ env.RELEASE_TAG }}" \
+              release/*.deb \
+              release/SHA256SUMS.txt \
+              release/build-metrics.txt \
+              --title "$RELEASE_TITLE" \
+              --notes-file release/CHANGELOG.md \
+              $PRERELEASE_FLAG
+          fi
           
           echo ""
           echo "✅ Release created successfully!"
