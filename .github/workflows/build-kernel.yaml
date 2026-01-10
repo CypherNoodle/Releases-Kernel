@@ -380,10 +380,10 @@ jobs:
               make -s listnewconfig | head -10
               echo ""
               echo "   ℹ️  Consider adding these to acer_sw1_011_defconfig"
-              echo "   ℹ️  For now, using defaults for new options..."
+              echo "   ℹ️  Applying defaults for new options (non-interactive)..."
               
-              # Solo aplicar defaults para opciones REALMENTE nuevas
-              yes "" | make oldconfig > /dev/null 2>&1 || true
+              # Usar olddefconfig en lugar de oldconfig - es completamente no-interactivo
+              make -s olddefconfig > /dev/null 2>&1
               
               echo "   ⚠️  Cache may be partially invalidated due to new options"
             else
@@ -419,6 +419,19 @@ jobs:
             scripts/config --disable CONFIG_GCOV_KERNEL
             scripts/config --disable CONFIG_KCOV
             
+            # Opciones específicas de Clang (prevenir preguntas interactivas)
+            if [ "${{ env.COMPILER }}" = "clang" ]; then
+              echo "⚙️  Applying Clang-specific options..."
+              scripts/config --disable CONFIG_LTO_CLANG_FULL
+              scripts/config --disable CONFIG_LTO_CLANG_THIN
+              scripts/config --enable CONFIG_LTO_NONE
+              scripts/config --disable CONFIG_CFI_CLANG
+              scripts/config --enable CONFIG_RANDSTRUCT_NONE
+              scripts/config --disable CONFIG_RANDSTRUCT_FULL
+              scripts/config --disable CONFIG_RANDSTRUCT_PERFORMANCE
+              scripts/config --disable CONFIG_KMSAN
+            fi
+            
             # Verificar si hay opciones nuevas después de aplicar scripts/config
             echo ""
             echo "⚙️  Checking for new config options..."
@@ -429,11 +442,11 @@ jobs:
               echo ""
               echo "   ℹ️  Applying defaults for new options (non-interactive)..."
               
-              # Solo para nuevas opciones que no estén en el defconfig
-              yes "" | make oldconfig > /dev/null 2>&1 || true
+              # olddefconfig es COMPLETAMENTE no-interactivo
+              make -s olddefconfig > /dev/null 2>&1
             else
               echo "   ✅ No new config options - defconfig is complete!"
-              echo "   ✅ Skipping oldconfig/olddefconfig (preserves timestamps)"
+              echo "   ✅ Skipping olddefconfig (preserves timestamps)"
             fi
           fi
           
@@ -447,11 +460,11 @@ jobs:
           echo "Localversion auto: disabled"
           if [ "${{ env.COMPILER }}" = "clang" ]; then
             echo "Optimization: x86-64-v2 (generic optimization)"
-            echo "LTO: disabled (from defconfig)"
-            echo "CFI: disabled (from defconfig)"
+            echo "LTO: disabled (explicitly set)"
+            echo "CFI: disabled (explicitly set)"
             echo "AutoFDO: disabled (from defconfig)"
-            echo "KMSAN: disabled (from defconfig)"
-            echo "RANDSTRUCT: none (from defconfig)"
+            echo "KMSAN: disabled (explicitly set)"
+            echo "RANDSTRUCT: none (explicitly set)"
           else
             echo "Optimization: Intel x5-Z8300 (Silvermont)"
           fi
