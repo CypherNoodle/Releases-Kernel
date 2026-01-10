@@ -372,40 +372,22 @@ jobs:
           
           if [ -f .config ] && [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
             echo "✅ Using cached .config for ${{ env.COMPILER }} (preserves timestamps for ccache)"
-            echo "   Skipping olddefconfig to preserve cache validity"
+            echo "   Skipping configuration to preserve cache validity"
             
             # Solo verificar que el .config es válido
-            if ! make -s listnewconfig | grep -q '^CONFIG'; then
-              echo "   ✅ No new config options - cache is valid"
-            else
-              echo "   ⚠️  New config options detected:"
+            if make -s listnewconfig | grep -q '^CONFIG'; then
+              echo "   ⚠️  WARNING: New config options detected:"
               make -s listnewconfig | head -10
               echo ""
-              echo "   ℹ️  Note: If you see Clang options here, consider adding them to acer_sw1_011_defconfig"
+              echo "   ℹ️  Consider adding these to acer_sw1_011_defconfig"
+              echo "   ℹ️  For now, using defaults for new options..."
               
-              # Solo para Clang: configurar nuevas opciones de forma no-interactiva
-              if [ "${{ env.COMPILER }}" = "clang" ]; then
-                echo "   ⚙️  Configuring new Clang options (non-interactive)..."
-                
-                # Configurar solo las opciones nuevas que puedan aparecer
-                # Nota: Si estas opciones ya están en tu defconfig, esto no hace nada
-                scripts/config --disable CONFIG_LTO_CLANG 2>/dev/null || true
-                scripts/config --disable CONFIG_LTO_CLANG_THIN 2>/dev/null || true
-                scripts/config --disable CONFIG_LTO_CLANG_FULL 2>/dev/null || true
-                scripts/config --disable CONFIG_CFI_CLANG 2>/dev/null || true
-                scripts/config --disable CONFIG_AUTOFDO_CLANG 2>/dev/null || true
-                scripts/config --set-val CONFIG_LTO_NONE y 2>/dev/null || true
-                scripts/config --disable CONFIG_KMSAN 2>/dev/null || true
-                scripts/config --set-val CONFIG_RANDSTRUCT_NONE y 2>/dev/null || true
-                
-                # Aplicar configuración con valores default para el resto
-                yes "" | make oldconfig > /dev/null 2>&1 || true
-                
-                echo "   ⚠️  WARNING: Cache may be partially invalidated due to new options"
-              else
-                # Para GCC: solo aplicar defaults sin regenerar todo
-                yes "" | make oldconfig > /dev/null 2>&1 || true
-              fi
+              # Solo aplicar defaults para opciones REALMENTE nuevas
+              yes "" | make oldconfig > /dev/null 2>&1 || true
+              
+              echo "   ⚠️  Cache may be partially invalidated due to new options"
+            else
+              echo "   ✅ No new config options - cache is 100% valid"
             fi
           else
             echo "⚙️  Generating fresh config from defconfig for ${{ env.COMPILER }}"
@@ -437,27 +419,22 @@ jobs:
             scripts/config --disable CONFIG_GCOV_KERNEL
             scripts/config --disable CONFIG_KCOV
             
-            # Opciones de Clang (fallback si no están en defconfig)
-            # Si ya están en tu defconfig, esto no hace nada y es redundante
-            if [ "${{ env.COMPILER }}" = "clang" ]; then
-              echo "⚙️  Verifying Clang-specific options..."
-              
-              # Estas líneas son redundantes si ya están en tu defconfig
-              # Pero no hacen daño y sirven como fallback
-              scripts/config --disable CONFIG_LTO_CLANG 2>/dev/null || true
-              scripts/config --disable CONFIG_LTO_CLANG_THIN 2>/dev/null || true
-              scripts/config --disable CONFIG_LTO_CLANG_FULL 2>/dev/null || true
-              scripts/config --set-val CONFIG_LTO_NONE y 2>/dev/null || true
-              scripts/config --disable CONFIG_CFI_CLANG 2>/dev/null || true
-              scripts/config --disable CONFIG_AUTOFDO_CLANG 2>/dev/null || true
-              scripts/config --disable CONFIG_KMSAN 2>/dev/null || true
-              scripts/config --set-val CONFIG_RANDSTRUCT_NONE y 2>/dev/null || true
-            fi
+            # Verificar si hay opciones nuevas después de aplicar scripts/config
+            echo ""
+            echo "⚙️  Checking for new config options..."
             
-            # Finalizar configuración de forma no-interactiva
-            echo "⚙️  Finalizing configuration (non-interactive)..."
-            yes "" | make oldconfig > /dev/null 2>&1 || true
-            make -s olddefconfig
+            if make -s listnewconfig | grep -q '^CONFIG'; then
+              echo "   ⚠️  New config options found (not in defconfig):"
+              make -s listnewconfig | head -10
+              echo ""
+              echo "   ℹ️  Applying defaults for new options (non-interactive)..."
+              
+              # Solo para nuevas opciones que no estén en el defconfig
+              yes "" | make oldconfig > /dev/null 2>&1 || true
+            else
+              echo "   ✅ No new config options - defconfig is complete!"
+              echo "   ✅ Skipping oldconfig/olddefconfig (preserves timestamps)"
+            fi
           fi
           
           echo ""
@@ -522,6 +499,10 @@ jobs:
           export KDOC_WERROR=0
           export LOCALVERSION=""
           
+          # CRÍTICO: Forzar modo no-interactivo para make
+          export DEBIAN_FRONTEND=noninteractive
+          export DEBCONF_NONINTERACTIVE_SEEN=true
+          
           NCPUS=$(nproc)
           JOBS=$((NCPUS + 2))
           
@@ -540,20 +521,36 @@ jobs:
           echo "CPU Cores: $NCPUS"
           echo "Parallel Jobs: $JOBS"
           echo "Kernel Version: ${{ env.KERNEL_VERSION }}"
+          echo "Interactive Mode: DISABLED (DEBIAN_FRONTEND=noninteractive)"
           echo "=========================================="
           echo ""
           
           START_TIME=$(date +%s)
           
           echo "🔨 Starting kernel compilation..."
-          make -s -j$JOBS \
+          
+          # Usar yes como pipe para responder automáticamente a cualquier pregunta
+          yes "" 2>/dev/null | make -s -j$JOBS \
             KERNELRELEASE=${{ env.KERNEL_VERSION }} \
             KDEB_PKGVERSION=${{ env.KERNEL_VERSION }}-1 \
             KDEB_SOURCENAME=linux-custom \
             KDEB_COMPRESS=xz \
             INSTALL_MOD_STRIP=1 \
             CONFIG_SHELL=/bin/bash \
-            bindeb-pkg 2>&1 | tee build.log
+            KCONFIG_NOTIMESTAMP=1 \
+            bindeb-pkg 2>&1 | tee build.log || {
+              # Si falla, intentar sin yes (fallback)
+              echo "⚠️  Build with 'yes' failed, retrying without pipe..."
+              make -s -j$JOBS \
+                KERNELRELEASE=${{ env.KERNEL_VERSION }} \
+                KDEB_PKGVERSION=${{ env.KERNEL_VERSION }}-1 \
+                KDEB_SOURCENAME=linux-custom \
+                KDEB_COMPRESS=xz \
+                INSTALL_MOD_STRIP=1 \
+                CONFIG_SHELL=/bin/bash \
+                KCONFIG_NOTIMESTAMP=1 \
+                bindeb-pkg 2>&1 | tee -a build.log
+            }
           
           END_TIME=$(date +%s)
           BUILD_TIME=$((END_TIME - START_TIME))
