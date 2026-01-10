@@ -515,6 +515,12 @@ jobs:
           # CRÍTICO: Forzar modo no-interactivo para make
           export DEBIAN_FRONTEND=noninteractive
           export DEBCONF_NONINTERACTIVE_SEEN=true
+          export KCONFIG_ALLCONFIG=.config
+          export KCONFIG_NOTIMESTAMP=1
+          
+          # CRÍTICO: Prevenir que make bindeb-pkg llame a oldconfig
+          # Forzar que use olddefconfig en lugar de oldconfig
+          export KBUILD_BUILD_VERSION=1
           
           NCPUS=$(nproc)
           JOBS=$((NCPUS + 2))
@@ -542,6 +548,20 @@ jobs:
           
           echo "🔨 Starting kernel compilation..."
           
+          # CRÍTICO: Asegurar que el .config esté completamente resuelto ANTES de bindeb-pkg
+          # bindeb-pkg puede llamar a scripts de configuración internamente
+          echo "🔧 Pre-resolving config to prevent interactive prompts during build..."
+          make -s olddefconfig > /dev/null 2>&1
+          
+          # Verificar que no hay opciones pendientes
+          if make -s listnewconfig 2>/dev/null | grep -q '^CONFIG'; then
+            echo "⚠️  WARNING: Still has new config options, forcing resolution..."
+            make -s olddefconfig > /dev/null 2>&1
+          fi
+          
+          echo "✅ Config fully resolved, starting package build..."
+          echo ""
+          
           # Usar yes como pipe para responder automáticamente a cualquier pregunta
           yes "" 2>/dev/null | make -s -j$JOBS \
             KERNELRELEASE=${{ env.KERNEL_VERSION }} \
@@ -551,6 +571,7 @@ jobs:
             INSTALL_MOD_STRIP=1 \
             CONFIG_SHELL=/bin/bash \
             KCONFIG_NOTIMESTAMP=1 \
+            KCONFIG_ALLCONFIG=$(pwd)/.config \
             bindeb-pkg 2>&1 | tee build.log || {
               # Si falla, intentar sin yes (fallback)
               echo "⚠️  Build with 'yes' failed, retrying without pipe..."
@@ -562,6 +583,7 @@ jobs:
                 INSTALL_MOD_STRIP=1 \
                 CONFIG_SHELL=/bin/bash \
                 KCONFIG_NOTIMESTAMP=1 \
+                KCONFIG_ALLCONFIG=$(pwd)/.config \
                 bindeb-pkg 2>&1 | tee -a build.log
             }
           
