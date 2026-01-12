@@ -483,21 +483,45 @@ jobs:
             export LLVM=1
             export LLVM_IAS=1
             
-            export KCFLAGS="-O2 -march=x86-64-v2 -mtune=generic -pipe"
+            # Optimizaciones para Silvermont con Clang
+            # Base flags seguras
+            CLANG_FLAGS="-O2 -march=x86-64-v2 -mtune=generic -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128"
+            
+            # Solo agregar -fomit-frame-pointer si CONFIG_FRAME_POINTER no está activo
+            if ! grep -q "CONFIG_FRAME_POINTER=y" .config; then
+              CLANG_FLAGS="$CLANG_FLAGS -fomit-frame-pointer"
+              echo "✅ Frame pointer optimization enabled (CONFIG_FRAME_POINTER=n)"
+            else
+              echo "⚠️  Skipping -fomit-frame-pointer (CONFIG_FRAME_POINTER=y requires it)"
+            fi
+            
+            export KCFLAGS="$CLANG_FLAGS"
             
             if [ "${{ env.LINKER }}" = "lld" ]; then
-              export LDFLAGS="-fuse-ld=lld"
+              export LDFLAGS="-fuse-ld=lld -Wl,--hash-style=gnu -Wl,--build-id=sha1"
               echo "✅ Using Clang + lld"
             fi
           else
             export CC="ccache gcc"
             export CXX="ccache g++"
             
-            export KCFLAGS="-O2 -march=silvermont -mtune=silvermont -pipe"
+            # Optimizaciones para Silvermont con GCC
+            # Base flags seguras
+            GCC_FLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16"
+            
+            # Solo agregar -fomit-frame-pointer si CONFIG_FRAME_POINTER no está activo
+            if ! grep -q "CONFIG_FRAME_POINTER=y" .config; then
+              GCC_FLAGS="$GCC_FLAGS -fomit-frame-pointer"
+              echo "✅ Frame pointer optimization enabled (CONFIG_FRAME_POINTER=n)"
+            else
+              echo "⚠️  Skipping -fomit-frame-pointer (CONFIG_FRAME_POINTER=y requires it)"
+            fi
+            
+            export KCFLAGS="$GCC_FLAGS"
             
             if [ "${{ env.LINKER }}" = "mold" ]; then
               if command -v mold &> /dev/null; then
-                export LDFLAGS="-fuse-ld=mold"
+                export LDFLAGS="-fuse-ld=mold -Wl,--hash-style=gnu -Wl,--build-id=sha1"
                 echo "✅ Using GCC + mold (ultra-fast)"
               else
                 echo "⚠️  mold not available, using default ld"
@@ -662,6 +686,29 @@ jobs:
           FINAL_SIZE=$(du -sh ~/.ccache 2>/dev/null | cut -f1 || echo "unknown")
           echo ""
           echo "💾 Final cache size: $FINAL_SIZE"
+          echo ""
+          echo "=========================================="
+          echo "DEBUG: Build duration analysis"
+          echo "=========================================="
+          echo "⏱️  Total build time: ${{ env.BUILD_TIME }} seconds ($((${{ env.BUILD_TIME }} / 60)) min)"
+          echo ""
+          if [ "${{ env.BUILD_TIME }}" -gt 7200 ]; then
+            echo "🚨 CRITICAL: Build took over 2 hours!"
+            echo "   Normal build should be 45-55 minutes"
+            echo "   Possible issues:"
+            echo "   1. ccache not working (check stats above)"
+            echo "   2. Debug symbols enabled"
+            echo "   3. LTO accidentally enabled"
+            echo "   4. Single-threaded compilation"
+            echo ""
+            echo "🔍 Checking configuration..."
+            cd kernel-src
+            echo "   LTO config:"
+            grep "CONFIG_LTO" .config || echo "   No LTO config found"
+            echo ""
+            echo "   Debug config:"
+            grep "CONFIG_DEBUG_INFO" .config || echo "   No DEBUG_INFO config found"
+          fi
           echo "=========================================="
 
       - name: Save ccache
