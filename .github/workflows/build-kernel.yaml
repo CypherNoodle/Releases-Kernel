@@ -269,7 +269,7 @@ jobs:
         id: config-restore
         with:
           path: kernel-src/.config
-          key: config-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig') }}
+          key: config-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig') }}-v2
           restore-keys: |
             config-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-
 
@@ -487,12 +487,24 @@ jobs:
             # Base flags seguras
             CLANG_FLAGS="-O2 -march=x86-64-v2 -mtune=generic -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128"
             
-            # Solo agregar -fomit-frame-pointer si CONFIG_FRAME_POINTER no está activo
-            if ! grep -q "CONFIG_FRAME_POINTER=y" .config; then
+            # Solo agregar -fomit-frame-pointer si es compatible con la config
+            FRAME_POINTER_BLOCKERS=""
+            if grep -q "CONFIG_FRAME_POINTER=y" .config; then
+              FRAME_POINTER_BLOCKERS="CONFIG_FRAME_POINTER=y"
+            fi
+            if grep -q "CONFIG_FUNCTION_TRACER=y" .config; then
+              FRAME_POINTER_BLOCKERS="$FRAME_POINTER_BLOCKERS CONFIG_FUNCTION_TRACER=y"
+            fi
+            if grep -q "CONFIG_STACK_TRACER=y" .config; then
+              FRAME_POINTER_BLOCKERS="$FRAME_POINTER_BLOCKERS CONFIG_STACK_TRACER=y"
+            fi
+            
+            if [ -z "$FRAME_POINTER_BLOCKERS" ]; then
               CLANG_FLAGS="$CLANG_FLAGS -fomit-frame-pointer"
-              echo "✅ Frame pointer optimization enabled (CONFIG_FRAME_POINTER=n)"
+              echo "✅ Frame pointer optimization enabled (+2-3% performance)"
             else
-              echo "⚠️  Skipping -fomit-frame-pointer (CONFIG_FRAME_POINTER=y requires it)"
+              echo "⚠️  Skipping -fomit-frame-pointer due to: $FRAME_POINTER_BLOCKERS"
+              echo "   These features require frame pointers to function correctly"
             fi
             
             export KCFLAGS="$CLANG_FLAGS"
@@ -509,12 +521,24 @@ jobs:
             # Base flags seguras
             GCC_FLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16"
             
-            # Solo agregar -fomit-frame-pointer si CONFIG_FRAME_POINTER no está activo
-            if ! grep -q "CONFIG_FRAME_POINTER=y" .config; then
+            # Solo agregar -fomit-frame-pointer si es compatible con la config
+            FRAME_POINTER_BLOCKERS=""
+            if grep -q "CONFIG_FRAME_POINTER=y" .config; then
+              FRAME_POINTER_BLOCKERS="CONFIG_FRAME_POINTER=y"
+            fi
+            if grep -q "CONFIG_FUNCTION_TRACER=y" .config; then
+              FRAME_POINTER_BLOCKERS="$FRAME_POINTER_BLOCKERS CONFIG_FUNCTION_TRACER=y"
+            fi
+            if grep -q "CONFIG_STACK_TRACER=y" .config; then
+              FRAME_POINTER_BLOCKERS="$FRAME_POINTER_BLOCKERS CONFIG_STACK_TRACER=y"
+            fi
+            
+            if [ -z "$FRAME_POINTER_BLOCKERS" ]; then
               GCC_FLAGS="$GCC_FLAGS -fomit-frame-pointer"
-              echo "✅ Frame pointer optimization enabled (CONFIG_FRAME_POINTER=n)"
+              echo "✅ Frame pointer optimization enabled (+2-3% performance)"
             else
-              echo "⚠️  Skipping -fomit-frame-pointer (CONFIG_FRAME_POINTER=y requires it)"
+              echo "⚠️  Skipping -fomit-frame-pointer due to: $FRAME_POINTER_BLOCKERS"
+              echo "   These features require frame pointers to function correctly"
             fi
             
             export KCFLAGS="$GCC_FLAGS"
@@ -734,7 +758,7 @@ jobs:
         if: always() && steps.config-restore.outputs.cache-hit != 'true'
         with:
           path: kernel-src/.config
-          key: config-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig') }}
+          key: config-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig') }}-v2
 
       - name: Save build metrics
         if: always()
@@ -944,6 +968,15 @@ jobs:
             exit 1
           fi
           
+          # Copiar paquetes Arch
+          if ls arch-packages/*.pkg.tar.* 1> /dev/null 2>&1; then
+            cp arch-packages/*.pkg.tar.* release/
+            ARCH_COUNT=$(ls release/*.pkg.tar.* 2>/dev/null | wc -l)
+            echo "✅ Copied $ARCH_COUNT Arch package(s)"
+          else
+            echo "⚠️  Warning: No Arch packages found"
+          fi
+          
           # Copiar CHANGELOG.md desde workspace root
           if [ -f "$GITHUB_WORKSPACE/CHANGELOG.md" ]; then
             cp "$GITHUB_WORKSPACE/CHANGELOG.md" release/
@@ -963,9 +996,23 @@ jobs:
             echo "⚠️  Warning: build-metrics.txt not found, skipping"
           fi
           
-          # Generar checksums
+          # Generar checksums (separados por tipo)
           cd release
-          sha256sum *.deb > SHA256SUMS.txt
+          
+          # Checksums para .deb
+          if ls *.deb 1> /dev/null 2>&1; then
+            sha256sum *.deb > SHA256SUMS-deb.txt
+            echo "✅ Generated SHA256SUMS-deb.txt"
+          fi
+          
+          # Checksums para Arch packages
+          if ls *.pkg.tar.* 1> /dev/null 2>&1; then
+            sha256sum *.pkg.tar.* > SHA256SUMS-arch.txt
+            echo "✅ Generated SHA256SUMS-arch.txt"
+          fi
+          
+          # Checksums combinados
+          sha256sum * 2>/dev/null | grep -v "SHA256SUMS" > SHA256SUMS.txt || true
           
           echo ""
           echo "=========================================="
@@ -973,8 +1020,11 @@ jobs:
           echo "=========================================="
           ls -lh
           echo ""
-          echo "📋 Checksums:"
-          cat SHA256SUMS.txt
+          echo "📋 Debian Checksums:"
+          cat SHA256SUMS-deb.txt 2>/dev/null || echo "No .deb packages"
+          echo ""
+          echo "📋 Arch Checksums:"
+          cat SHA256SUMS-arch.txt 2>/dev/null || echo "No Arch packages"
           echo "=========================================="
 
       - name: Upload build artifacts
@@ -984,6 +1034,7 @@ jobs:
           name: kernel-${{ env.KERNEL_VERSION }}-build-${{ github.run_number }}
           path: |
             release/*.deb
+            release/*.pkg.tar.*
             release/*.txt
             release/*.md
             kernel-src/build.log
@@ -1016,7 +1067,8 @@ jobs:
             
             gh release create "$PRERELEASE_TAG" \
               release/*.deb \
-              release/SHA256SUMS.txt \
+              release/*.pkg.tar.* \
+              release/SHA256SUMS*.txt \
               release/build-metrics.txt \
               --title "$RELEASE_TITLE (Build #${{ github.run_number }})" \
               --notes-file release/CHANGELOG.md \
@@ -1024,7 +1076,8 @@ jobs:
           else
             gh release create "${{ env.RELEASE_TAG }}" \
               release/*.deb \
-              release/SHA256SUMS.txt \
+              release/*.pkg.tar.* \
+              release/SHA256SUMS*.txt \
               release/build-metrics.txt \
               --title "$RELEASE_TITLE" \
               --notes-file release/CHANGELOG.md \
