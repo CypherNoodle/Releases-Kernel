@@ -859,20 +859,22 @@ jobs:
 
           # Instalar módulos en el staging con las herramientas ya presentes en el runner
           echo "📦 Instalando módulos en staging (con INSTALL_MOD_STRIP=1)..."
+          # INSTALL_MOD_PATH apunta a $STAGING/usr para que los módulos
+          # queden en usr/lib/modules/ — Arch usa /usr/lib, no /lib
           make -C /tmp/kernel-build \
             modules_install \
-            INSTALL_MOD_PATH="$STAGING" \
+            INSTALL_MOD_PATH="$STAGING/usr" \
             INSTALL_MOD_STRIP=1 \
             KERNELRELEASE=${{ env.KERNEL_VERSION }} \
             -s
 
           # Eliminar symlinks que apuntarían a paths del runner (no válidos dentro del paquete)
-          rm -f "$STAGING/lib/modules/${{ env.KERNEL_VERSION }}/build"
-          rm -f "$STAGING/lib/modules/${{ env.KERNEL_VERSION }}/source"
+          rm -f "$STAGING/usr/lib/modules/${{ env.KERNEL_VERSION }}/build"
+          rm -f "$STAGING/usr/lib/modules/${{ env.KERNEL_VERSION }}/source"
 
           echo "✅ Staging listo:"
           echo "   Boot: $(ls $STAGING/boot/)"
-          echo "   Módulos .ko: $(find $STAGING/lib/modules -name '*.ko*' 2>/dev/null | wc -l) archivos"
+          echo "   Módulos .ko: $(find $STAGING/usr/lib/modules -name '*.ko*' 2>/dev/null | wc -l) archivos"
           echo "   Tamaño total: $(du -sh $STAGING | cut -f1)"
           echo ""
 
