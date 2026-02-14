@@ -841,60 +841,51 @@ jobs:
             PKGDESC="Kernel Linux ${{ env.KERNEL_VERSION }} para Acer SW1-011 (GCC+${{ env.LINKER }}, Silvermont)"
           fi
 
-          # ── Generar PKGBUILD ───────────────────────────────────────────────
-          # Nota: la función package() copia desde /staging (mount de Docker)
-          cat > "$PKGOUT/PKGBUILD" << PKGBUILD_END
-# Maintainer: CypherNoodle <github.com/CypherNoodle>
-# Generado por GitHub Actions — Build #${{ github.run_number }}
-# Toolchain: ${{ env.COMPILER }} + ${{ env.LINKER }}
-
-pkgname=linux-acer-sw1-011
-pkgver=${{ env.KERNEL_VERSION }}
-pkgrel=1
-pkgdesc="${PKGDESC}"
-arch=('x86_64')
-url="https://github.com/CypherNoodle/linux-Sw1-011"
-license=('GPL2')
-depends=('coreutils' 'kmod' 'mkinitcpio>=0.7')
-optdepends=(
-    'linux-firmware: firmware para hardware periférico'
-)
-provides=("linux=${{ env.KERNEL_VERSION }}")
-options=('!strip')
-
-package() {
-    # Copiar staging pre-construido (binarios ya compilados y módulos con strip)
-    cp -a /staging/. "\${pkgdir}/"
-
-    chmod 644 "\${pkgdir}/boot/vmlinuz-${{ env.KERNEL_VERSION }}"
-
-    # Preset mkinitcpio para regenerar initramfs
-    install -Dm644 /dev/stdin \
-      "\${pkgdir}/etc/mkinitcpio.d/linux-acer-sw1-011.preset" << 'PRESET_END'
-ALL_config="/etc/mkinitcpio.conf"
-ALL_kver="/boot/vmlinuz-${{ env.KERNEL_VERSION }}"
-PRESETS=('default' 'fallback')
-default_image="/boot/initramfs-linux-acer-sw1-011.img"
-fallback_options="-S autodetect"
-fallback_image="/boot/initramfs-linux-acer-sw1-011-fallback.img"
-PRESET_END
-
-    # Hook de pacman: regenera initramfs automáticamente al instalar/actualizar
-    install -Dm644 /dev/stdin \
-      "\${pkgdir}/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook" << 'HOOK_END'
-[Trigger]
-Operation = Install
-Operation = Upgrade
-Type = Package
-Target = linux-acer-sw1-011
-
-[Action]
-Description = Generando initramfs para linux-acer-sw1-011...
-When = PostTransaction
-Exec = /usr/bin/mkinitcpio -p linux-acer-sw1-011
-HOOK_END
-}
-PKGBUILD_END
+          # ── Generar PKGBUILD con printf (evita problemas de heredoc en YAML) ──
+          KV="${{ env.KERNEL_VERSION }}"
+          {
+            printf '# Maintainer: CypherNoodle <github.com/CypherNoodle>\n'
+            printf '# Generado por GitHub Actions - Build #%s\n' "${{ github.run_number }}"
+            printf '# Toolchain: %s + %s\n\n' "${{ env.COMPILER }}" "${{ env.LINKER }}"
+            printf 'pkgname=linux-acer-sw1-011\n'
+            printf 'pkgver=%s\n' "$KV"
+            printf 'pkgrel=1\n'
+            printf 'pkgdesc="%s"\n' "$PKGDESC"
+            printf "arch=('x86_64')\n"
+            printf 'url="https://github.com/CypherNoodle/linux-Sw1-011"\n'
+            printf "license=('GPL2')\n"
+            printf "depends=('coreutils' 'kmod' 'mkinitcpio>=0.7')\n"
+            printf 'optdepends=(\n'
+            printf "    'linux-firmware: firmware para hardware periférico'\n"
+            printf ')\n'
+            printf 'provides=("linux=%s")\n' "$KV"
+            printf "options=('!strip')\n\n"
+            printf 'package() {\n'
+            printf '    cp -a /staging/. "${pkgdir}/"\n\n'
+            printf '    chmod 644 "${pkgdir}/boot/vmlinuz-%s"\n\n' "$KV"
+            printf '    install -Dm644 /dev/stdin\n'
+            printf '      "${pkgdir}/etc/mkinitcpio.d/linux-acer-sw1-011.preset" << '"'"'PRESET_END'"'"'\n'
+            printf 'ALL_config="/etc/mkinitcpio.conf"\n'
+            printf 'ALL_kver="/boot/vmlinuz-%s"\n' "$KV"
+            printf "PRESETS=('default' 'fallback')\n"
+            printf 'default_image="/boot/initramfs-linux-acer-sw1-011.img"\n'
+            printf 'fallback_options="-S autodetect"\n'
+            printf 'fallback_image="/boot/initramfs-linux-acer-sw1-011-fallback.img"\n'
+            printf 'PRESET_END\n\n'
+            printf '    install -Dm644 /dev/stdin\n'
+            printf '      "${pkgdir}/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook" << '"'"'HOOK_END'"'"'\n'
+            printf '[Trigger]\n'
+            printf 'Operation = Install\n'
+            printf 'Operation = Upgrade\n'
+            printf 'Type = Package\n'
+            printf 'Target = linux-acer-sw1-011\n\n'
+            printf '[Action]\n'
+            printf 'Description = Generando initramfs para linux-acer-sw1-011...\n'
+            printf 'When = PostTransaction\n'
+            printf 'Exec = /usr/bin/mkinitcpio -p linux-acer-sw1-011\n'
+            printf 'HOOK_END\n'
+            printf '}\n'
+          } > "$PKGOUT/PKGBUILD"
 
           echo "=== PKGBUILD generado ==="
           cat "$PKGOUT/PKGBUILD"
