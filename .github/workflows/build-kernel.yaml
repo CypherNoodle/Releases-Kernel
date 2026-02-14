@@ -479,8 +479,7 @@ jobs:
             echo "Optimización: Intel x5-Z8300 (Silvermont)"
           fi
 
-      - name: Build .deb kernel packages
-        if: env.PACKAGE_FORMAT == 'deb' || env.PACKAGE_FORMAT == 'ambos'
+      - name: Compile kernel
         working-directory: kernel-src
         run: |
           export PATH="/usr/lib/ccache:$PATH"
@@ -561,15 +560,9 @@ jobs:
           fi
 
           export KCPPFLAGS="-D_FORTIFY_SOURCE=2"
-
           export KDOC_WERROR=0
           export LOCALVERSION=""
-
-          export DEBIAN_FRONTEND=noninteractive
-          export DEBCONF_NONINTERACTIVE_SEEN=true
-          export KCONFIG_ALLCONFIG=.config
           export KCONFIG_NOTIMESTAMP=1
-
           export KBUILD_BUILD_VERSION=1
 
           NCPUS=$(nproc)
@@ -590,24 +583,66 @@ jobs:
           echo "CPU Cores: $NCPUS"
           echo "Jobs en paralelo: $JOBS"
           echo "Versión del kernel: ${{ env.KERNEL_VERSION }}"
-          echo "Modo interactivo: DESACTIVADO (DEBIAN_FRONTEND=noninteractive)"
+          echo "Formato de paquete: ${{ env.PACKAGE_FORMAT }}"
           echo "=========================================="
           echo ""
 
+          echo "🔧 Pre-resolviendo config..."
+          make -s olddefconfig > /dev/null 2>&1
+          make -s listnewconfig 2>/dev/null | grep -q '^CONFIG' \
+            && make -s olddefconfig > /dev/null 2>&1 || true
+
           START_TIME=$(date +%s)
 
-          echo "🔨 Iniciando compilación del kernel..."
+          echo "🔨 Compilando bzImage + módulos..."
+          make -j$JOBS \
+            KERNELRELEASE=${{ env.KERNEL_VERSION }} \
+            KCONFIG_NOTIMESTAMP=1 \
+            bzImage modules 2>&1 | tee build.log
 
-          echo "🔧 Pre-resolviendo config para prevenir prompts interactivos durante la build..."
-          make -s olddefconfig > /dev/null 2>&1
+          END_TIME=$(date +%s)
+          BUILD_TIME=$((END_TIME - START_TIME))
 
-          if make -s listnewconfig 2>/dev/null | grep -q '^CONFIG'; then
-            echo "⚠️  ADVERTENCIA: Aún hay opciones de config pendientes, forzando resolución..."
-            make -s olddefconfig > /dev/null 2>&1
+          echo ""
+          echo "=========================================="
+          echo "✅ COMPILACIÓN COMPLETADA"
+          echo "=========================================="
+          echo "Tiempo: $((BUILD_TIME / 60))m $((BUILD_TIME % 60))s"
+          echo "bzImage: $(ls -lh arch/x86/boot/bzImage)"
+          echo "=========================================="
+          echo "BUILD_TIME=$BUILD_TIME" >> $GITHUB_ENV
+
+      - name: Package .deb
+        if: env.PACKAGE_FORMAT == 'deb' || env.PACKAGE_FORMAT == 'ambos'
+        working-directory: kernel-src
+        run: |
+          export PATH="/usr/lib/ccache:$PATH"
+          export CCACHE_DIR="$HOME/.ccache"
+
+          if [ "${{ env.COMPILER }}" = "clang" ]; then
+            export CC="ccache clang"
+            export CXX="ccache clang++"
+            export HOSTCC="clang"
+            export HOSTCXX="clang++"
+            export LLVM=1
+            export LLVM_IAS=1
+          else
+            export CC="ccache gcc"
+            export CXX="ccache g++"
           fi
 
-          echo "✅ Config completamente resuelto, iniciando build de paquetes..."
-          echo ""
+          export KCPPFLAGS="-D_FORTIFY_SOURCE=2"
+          export KDOC_WERROR=0
+          export LOCALVERSION=""
+          export DEBIAN_FRONTEND=noninteractive
+          export DEBCONF_NONINTERACTIVE_SEEN=true
+          export KCONFIG_ALLCONFIG=.config
+          export KCONFIG_NOTIMESTAMP=1
+          export KBUILD_BUILD_VERSION=1
+
+          JOBS=$(($(nproc) + 2))
+
+          echo "🔨 Empaquetando .deb (reutiliza objetos ya compilados)..."
 
           yes "" 2>/dev/null | make -s -j$JOBS \
             KERNELRELEASE=${{ env.KERNEL_VERSION }} \
@@ -618,7 +653,7 @@ jobs:
             CONFIG_SHELL=/bin/bash \
             KCONFIG_NOTIMESTAMP=1 \
             KCONFIG_ALLCONFIG=$(pwd)/.config \
-            bindeb-pkg 2>&1 | tee build.log || {
+            bindeb-pkg 2>&1 | tee -a build.log || {
               echo "⚠️  Build con 'yes' falló, reintentando sin pipe..."
               make -s -j$JOBS \
                 KERNELRELEASE=${{ env.KERNEL_VERSION }} \
@@ -632,21 +667,8 @@ jobs:
                 bindeb-pkg 2>&1 | tee -a build.log
             }
 
-          END_TIME=$(date +%s)
-          BUILD_TIME=$((END_TIME - START_TIME))
-          BUILD_MIN=$((BUILD_TIME / 60))
-          BUILD_SEC=$((BUILD_TIME % 60))
-
           echo ""
-          echo "=========================================="
-          echo "✅ BUILD .DEB COMPLETADA EXITOSAMENTE!"
-          echo "=========================================="
-          echo "Tiempo de build: ${BUILD_MIN} minutos ${BUILD_SEC} segundos"
-          echo "=========================================="
-          echo "BUILD_TIME=$BUILD_TIME" >> $GITHUB_ENV
-
-          echo ""
-          echo "📦 Paquetes .deb generados:"
+          echo "✅ Paquetes .deb generados:"
           ls -lh ../*.deb
 
       - name: Show ccache statistics
