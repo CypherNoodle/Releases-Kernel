@@ -620,15 +620,35 @@ jobs:
           export CCACHE_DIR="$HOME/.ccache"
 
           if [ "${{ env.COMPILER }}" = "clang" ]; then
-            export CC="ccache clang"
-            export CXX="ccache clang++"
-            export HOSTCC="clang"
-            export HOSTCXX="clang++"
-            export LLVM=1
-            export LLVM_IAS=1
+           export CC="ccache clang"
+           export CXX="ccache clang++"
+           export HOSTCC="clang"
+           export HOSTCXX="clang++"
+           export LLVM=1
+           export LLVM_IAS=1
+
+           CLANG_FLAGS="-O2 -march=x86-64-v2 -mtune=generic -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128"
+           if ! grep -qE "CONFIG_FRAME_POINTER=y|CONFIG_FUNCTION_TRACER=y|CONFIG_STACK_TRACER=y" .config; then
+             CLANG_FLAGS="$CLANG_FLAGS -fomit-frame-pointer"
+           fi
+           export KCFLAGS="$CLANG_FLAGS"
+
+           if [ "${{ env.LINKER }}" = "lld" ]; then
+             export LDFLAGS="-fuse-ld=lld -Wl,--hash-style=gnu -Wl,--build-id=sha1"
+           fi
           else
-            export CC="ccache gcc"
-            export CXX="ccache g++"
+           export CC="ccache gcc"
+           export CXX="ccache g++"
+
+           GCC_FLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16"
+           if ! grep -qE "CONFIG_FRAME_POINTER=y|CONFIG_FUNCTION_TRACER=y|CONFIG_STACK_TRACER=y" .config; then
+             GCC_FLAGS="$GCC_FLAGS -fomit-frame-pointer"
+           fi
+           export KCFLAGS="$GCC_FLAGS"
+
+           if [ "${{ env.LINKER }}" = "mold" ] && command -v mold &> /dev/null; then
+             export LDFLAGS="-fuse-ld=mold -Wl,--hash-style=gnu -Wl,--build-id=sha1"
+           fi
           fi
 
           export KCPPFLAGS="-D_FORTIFY_SOURCE=2"
@@ -863,12 +883,37 @@ jobs:
             PKGDESC="Kernel Linux ${{ env.KERNEL_VERSION }} para Acer SW1-011 (GCC+${{ env.LINKER }}, Silvermont)"
           fi
 
-          # ── Generar PKGBUILD con printf (evita problemas de heredoc en YAML) ──
+          # ── Escribir preset y hook en el staging ANTES de que makepkg corra ──
+          # Usar printf evita problemas de heredoc indentado en YAML y de
+          # /dev/stdin no disponible en el entorno fakeroot de makepkg.
           KV="${{ env.KERNEL_VERSION }}"
+
+          mkdir -p "$STAGING/etc/mkinitcpio.d"
+          printf 'ALL_config="/etc/mkinitcpio.conf"\n' > "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
+          printf 'ALL_kver="/boot/vmlinuz-%s"\n' "$KV"    >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
+          printf "PRESETS=('default' 'fallback')\n"        >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
+          printf 'default_image="/boot/initramfs-linux-acer-sw1-011.img"\n'       >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
+          printf 'fallback_options="-S autodetect"\n'       >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
+          printf 'fallback_image="/boot/initramfs-linux-acer-sw1-011-fallback.img"\n' >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
+
+          mkdir -p "$STAGING/usr/share/libalpm/hooks"
+          printf '[Trigger]\nOperation = Install\nOperation = Upgrade\nType = Package\nTarget = linux-acer-sw1-011\n' \
+            > "$STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
+          printf '\n[Action]\nDescription = Generando initramfs para linux-acer-sw1-011...\nWhen = PostTransaction\nExec = /usr/bin/mkinitcpio -p linux-acer-sw1-011\n' \
+            >> "$STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
+
+          echo "✅ Preset:"
+          cat "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
+          echo ""
+          echo "✅ Hook:"
+          cat "$STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
+          echo ""
+
+          # ── Generar PKGBUILD con printf ────────────────────────────────────
           {
             printf '# Maintainer: CypherNoodle <github.com/CypherNoodle>\n'
-            printf '# Generado por GitHub Actions - Build #%s\n' "${{ github.run_number }}"
-            printf '# Toolchain: %s + %s\n\n' "${{ env.COMPILER }}" "${{ env.LINKER }}"
+            printf '# Generado por GitHub Actions - Build #${{ github.run_number }}\n'
+            printf '# Toolchain: ${{ env.COMPILER }} + ${{ env.LINKER }}\n\n'
             printf 'pkgname=linux-acer-sw1-011\n'
             printf 'pkgver=%s\n' "$KV"
             printf 'pkgrel=1\n'
@@ -883,29 +928,9 @@ jobs:
             printf 'provides=("linux=%s")\n' "$KV"
             printf "options=('!strip')\n\n"
             printf 'package() {\n'
-            printf '    cp -a /staging/. "${pkgdir}/"\n\n'
-            printf '    chmod 644 "${pkgdir}/boot/vmlinuz-%s"\n\n' "$KV"
-            printf '    install -Dm644 /dev/stdin\n'
-            printf '      "${pkgdir}/etc/mkinitcpio.d/linux-acer-sw1-011.preset" << '"'"'PRESET_END'"'"'\n'
-            printf 'ALL_config="/etc/mkinitcpio.conf"\n'
-            printf 'ALL_kver="/boot/vmlinuz-%s"\n' "$KV"
-            printf "PRESETS=('default' 'fallback')\n"
-            printf 'default_image="/boot/initramfs-linux-acer-sw1-011.img"\n'
-            printf 'fallback_options="-S autodetect"\n'
-            printf 'fallback_image="/boot/initramfs-linux-acer-sw1-011-fallback.img"\n'
-            printf 'PRESET_END\n\n'
-            printf '    install -Dm644 /dev/stdin\n'
-            printf '      "${pkgdir}/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook" << '"'"'HOOK_END'"'"'\n'
-            printf '[Trigger]\n'
-            printf 'Operation = Install\n'
-            printf 'Operation = Upgrade\n'
-            printf 'Type = Package\n'
-            printf 'Target = linux-acer-sw1-011\n\n'
-            printf '[Action]\n'
-            printf 'Description = Generando initramfs para linux-acer-sw1-011...\n'
-            printf 'When = PostTransaction\n'
-            printf 'Exec = /usr/bin/mkinitcpio -p linux-acer-sw1-011\n'
-            printf 'HOOK_END\n'
+            printf '    # staging ya incluye preset y hook, solo copiar\n'
+            printf '    cp -a /staging/. "${pkgdir}/"\n'
+            printf '    chmod 644 "${pkgdir}/boot/vmlinuz-%s"\n' "$KV"
             printf '}\n'
           } > "$PKGOUT/PKGBUILD"
 
