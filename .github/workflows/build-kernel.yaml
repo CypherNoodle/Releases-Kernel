@@ -868,10 +868,6 @@ jobs:
             KERNELRELEASE=${{ env.KERNEL_VERSION }} \
             -s
 
-          # Crear symlink /lib -> usr/lib para compatibilidad con mkinitcpio
-          # mkinitcpio busca módulos en /lib/modules/, pero Arch los pone en /usr/lib/modules/
-          ln -sf usr/lib "$STAGING/lib"
-
           # Eliminar symlinks que apuntarían a paths del runner (no válidos dentro del paquete)
           rm -f "$STAGING/usr/lib/modules/${{ env.KERNEL_VERSION }}/build"
           rm -f "$STAGING/usr/lib/modules/${{ env.KERNEL_VERSION }}/source"
@@ -903,6 +899,14 @@ jobs:
           printf 'fallback_image="/boot/initramfs-linux-acer-sw1-011-fallback.img"\n' >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
 
           mkdir -p "$STAGING/usr/share/libalpm/hooks"
+
+          # Hook 60: depmod (corre PRIMERO para regenerar dependencias de módulos)
+          printf '[Trigger]\nOperation = Install\nOperation = Upgrade\nOperation = Remove\nType = Path\nTarget = usr/lib/modules/%s/*\n' "$KV" \
+            > "$STAGING/usr/share/libalpm/hooks/60-linux-acer-sw1-011-depmod.hook"
+          printf '\n[Action]\nDescription = Actualizando dependencias de módulos para %s...\nWhen = PostTransaction\nExec = /usr/bin/depmod %s\n' "$KV" "$KV" \
+            >> "$STAGING/usr/share/libalpm/hooks/60-linux-acer-sw1-011-depmod.hook"
+
+          # Hook 95: mkinitcpio (corre DESPUÉS, cuando depmod ya terminó)
           printf '[Trigger]\nOperation = Install\nOperation = Upgrade\nType = Package\nTarget = linux-acer-sw1-011\n' \
             > "$STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
           printf '\n[Action]\nDescription = Generando initramfs para linux-acer-sw1-011...\nWhen = PostTransaction\nExec = /usr/bin/mkinitcpio -p linux-acer-sw1-011\n' \
@@ -911,7 +915,10 @@ jobs:
           echo "✅ Preset:"
           cat "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
           echo ""
-          echo "✅ Hook:"
+          echo "✅ Hook depmod (60):"
+          cat "$STAGING/usr/share/libalpm/hooks/60-linux-acer-sw1-011-depmod.hook"
+          echo ""
+          echo "✅ Hook mkinitcpio (95):"
           cat "$STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
           echo ""
 
