@@ -868,6 +868,10 @@ jobs:
             KERNELRELEASE=${{ env.KERNEL_VERSION }} \
             -s
 
+          # Crear symlink /lib -> usr/lib para compatibilidad con mkinitcpio
+          # mkinitcpio busca módulos en /lib/modules/, pero Arch los pone en /usr/lib/modules/
+          ln -sf usr/lib "$STAGING/lib"
+
           # Eliminar symlinks que apuntarían a paths del runner (no válidos dentro del paquete)
           rm -f "$STAGING/usr/lib/modules/${{ env.KERNEL_VERSION }}/build"
           rm -f "$STAGING/usr/lib/modules/${{ env.KERNEL_VERSION }}/source"
