@@ -851,7 +851,7 @@ jobs:
           echo "📦 Recopilando binarios del kernel desde tmpfs..."
 
           cp /tmp/kernel-build/arch/x86/boot/bzImage \
-            "$STAGING/boot/vmlinuz-${{ env.KERNEL_VERSION }}"
+            "$STAGING/boot/vmlinuz-linux-acer-sw1-011"
           cp /tmp/kernel-build/System.map \
             "$STAGING/boot/System.map-${{ env.KERNEL_VERSION }}"
           cp /tmp/kernel-build/.config \
@@ -892,8 +892,7 @@ jobs:
 
           mkdir -p "$STAGING/etc/mkinitcpio.d"
           printf 'ALL_config="/etc/mkinitcpio.conf"\n' > "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          printf 'ALL_kver="/boot/vmlinuz-%s"\n' "$KV"    >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          printf "PRESETS=('default' 'fallback')\n"        >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
+          printf 'ALL_kver="/boot/vmlinuz-linux-acer-sw1-011"\n' > "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"          printf "PRESETS=('default' 'fallback')\n"        >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
           printf 'default_image="/boot/initramfs-linux-acer-sw1-011.img"\n'       >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
           printf 'fallback_options="-S autodetect"\n'       >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
           printf 'fallback_image="/boot/initramfs-linux-acer-sw1-011-fallback.img"\n' >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
@@ -943,7 +942,7 @@ jobs:
             printf 'package() {\n'
             printf '    # staging ya incluye preset y hook, solo copiar\n'
             printf '    cp -a /staging/. "${pkgdir}/"\n'
-            printf '    chmod 644 "${pkgdir}/boot/vmlinuz-%s"\n' "$KV"
+            printf '    chmod 644 "${pkgdir}/boot/vmlinuz-linux-acer-sw1-011"\n'
             printf '}\n'
           } > "$PKGOUT/PKGBUILD"
 
