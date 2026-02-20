@@ -847,8 +847,8 @@ jobs:
           mkdir -p "$STAGING/boot"
           mkdir -p "$PKGOUT"
 
-          # ── Recopilar binarios desde el tmpfs ──────────────────────────────
-          echo "📦 Recopilando binarios del kernel desde tmpfs..."
+          # ── 1. Recopilar binarios con nombre unificado ──────────────────
+          echo "📦 Recopilando binarios del kernel..."
 
           cp /tmp/kernel-build/arch/x86/boot/bzImage \
             "$STAGING/boot/vmlinuz-linux-acer-sw1-011"
@@ -857,10 +857,8 @@ jobs:
           cp /tmp/kernel-build/.config \
             "$STAGING/boot/config-${{ env.KERNEL_VERSION }}"
 
-          # Instalar módulos en el staging con las herramientas ya presentes en el runner
-          echo "📦 Instalando módulos en staging (con INSTALL_MOD_STRIP=1)..."
-          # INSTALL_MOD_PATH apunta a $STAGING/usr para que los módulos
-          # queden en usr/lib/modules/ — Arch usa /usr/lib, no /lib
+          # Instalar módulos
+          echo "📦 Instalando módulos en staging..."
           make -C /tmp/kernel-build \
             modules_install \
             INSTALL_MOD_PATH="$STAGING/usr" \
@@ -868,125 +866,90 @@ jobs:
             KERNELRELEASE=${{ env.KERNEL_VERSION }} \
             -s
 
-          # Eliminar symlinks que apuntarían a paths del runner (no válidos dentro del paquete)
+          # Limpiar symlinks inválidos
           rm -f "$STAGING/usr/lib/modules/${{ env.KERNEL_VERSION }}/build"
           rm -f "$STAGING/usr/lib/modules/${{ env.KERNEL_VERSION }}/source"
 
-          echo "✅ Staging listo:"
-          echo "   Boot: $(ls $STAGING/boot/)"
-          echo "   Módulos .ko: $(find $STAGING/usr/lib/modules -name '*.ko*' 2>/dev/null | wc -l) archivos"
-          echo "   Tamaño total: $(du -sh $STAGING | cut -f1)"
-          echo ""
-
-          # ── Determinar descripción según toolchain ─────────────────────────
-          if [ "${{ env.COMPILER }}" = "clang" ]; then
-            PKGDESC="Kernel Linux ${{ env.KERNEL_VERSION }} para Acer SW1-011 (Clang+LLD, x86-64-v2)"
-          else
-            PKGDESC="Kernel Linux ${{ env.KERNEL_VERSION }} para Acer SW1-011 (GCC+${{ env.LINKER }}, Silvermont)"
-          fi
-
-          # ── Escribir preset y hook en el staging ANTES de que makepkg corra ──
-          # Usar printf evita problemas de heredoc indentado en YAML y de
-          # /dev/stdin no disponible en el entorno fakeroot de makepkg.
+          # ── 2. Escribir preset y hooks (CORREGIDO) ────────────────────────
           KV="${{ env.KERNEL_VERSION }}"
-
           mkdir -p "$STAGING/etc/mkinitcpio.d"
-          printf 'ALL_config="/etc/mkinitcpio.conf"\n' > "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          printf 'ALL_kver="/boot/vmlinuz-linux-acer-sw1-011"\n' > "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"          printf "PRESETS=('default' 'fallback')\n"        >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          printf 'default_image="/boot/initramfs-linux-acer-sw1-011.img"\n'       >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          printf 'fallback_options="-S autodetect"\n'       >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          printf 'fallback_image="/boot/initramfs-linux-acer-sw1-011-fallback.img"\n' >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
+          
+          # Corregido: Se usa cat <<EOF para evitar el error del archivo vacío
+          cat <<EOF > "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
+          ALL_config="/etc/mkinitcpio.conf"
+          ALL_kver="/boot/vmlinuz-linux-acer-sw1-011"
+          PRESETS=('default' 'fallback')
+
+          default_image="/boot/initramfs-linux-acer-sw1-011.img"
+          fallback_image="/boot/initramfs-linux-acer-sw1-011-fallback.img"
+          fallback_options="-S autodetect"
+          EOF
 
           mkdir -p "$STAGING/usr/share/libalpm/hooks"
 
-          # Hook 60: depmod (corre PRIMERO para regenerar dependencias de módulos)
-          printf '[Trigger]\nOperation = Install\nOperation = Upgrade\nOperation = Remove\nType = Path\nTarget = usr/lib/modules/%s/*\n' "$KV" \
-            > "$STAGING/usr/share/libalpm/hooks/60-linux-acer-sw1-011-depmod.hook"
-          printf '\n[Action]\nDescription = Actualizando dependencias de módulos para %s...\nWhen = PostTransaction\nExec = /usr/bin/depmod %s\n' "$KV" "$KV" \
-            >> "$STAGING/usr/share/libalpm/hooks/60-linux-acer-sw1-011-depmod.hook"
+          # Hook 60: depmod
+          cat <<EOF > "$STAGING/usr/share/libalpm/hooks/60-linux-acer-sw1-011-depmod.hook"
+          [Trigger]
+          Operation = Install
+          Operation = Upgrade
+          Operation = Remove
+          Type = Path
+          Target = usr/lib/modules/$KV/*
 
-          # Hook 95: mkinitcpio (corre DESPUÉS, cuando depmod ya terminó)
-          printf '[Trigger]\nOperation = Install\nOperation = Upgrade\nType = Package\nTarget = linux-acer-sw1-011\n' \
-            > "$STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
-          printf '\n[Action]\nDescription = Generando initramfs para linux-acer-sw1-011...\nWhen = PostTransaction\nExec = /usr/bin/mkinitcpio -p linux-acer-sw1-011\n' \
-            >> "$STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
+          [Action]
+          Description = Actualizando dependencias de módulos para $KV...
+          When = PostTransaction
+          Exec = /usr/bin/depmod $KV
+          EOF
 
-          echo "✅ Preset:"
-          cat "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          echo ""
-          echo "✅ Hook depmod (60):"
-          cat "$STAGING/usr/share/libalpm/hooks/60-linux-acer-sw1-011-depmod.hook"
-          echo ""
-          echo "✅ Hook mkinitcpio (95):"
-          cat "$STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
-          echo ""
+          # Hook 95: mkinitcpio
+          cat <<EOF > "$STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
+          [Trigger]
+          Operation = Install
+          Operation = Upgrade
+          Type = Package
+          Target = linux-acer-sw1-011
+          
+          [Action]
+          Description = Generando initramfs para linux-acer-sw1-011...
+          When = PostTransaction
+          Exec = /usr/bin/mkinitcpio -p linux-acer-sw1-011
+          EOF
+          
+                    # ── 3. Generar PKGBUILD ──────────────────────────────────────────
+                    PKGDESC="Kernel Linux $KV para Acer SW1-011 (${{ env.COMPILER }})"
+                    
+                    cat <<EOF > "$PKGOUT/PKGBUILD"
+          pkgname=linux-acer-sw1-011
+          pkgver=$KV
+          pkgrel=1
+          pkgdesc="$PKGDESC"
+          arch=('x86_64')
+          url="https://github.com/CypherNoodle/linux-Sw1-011"
+          license=('GPL2')
+          depends=('coreutils' 'kmod' 'mkinitcpio>=0.7')
+          provides=("linux=$KV")
+          options=('!strip')
+          
+          package() {
+              cp -a /staging/. "\${pkgdir}/"
+              chmod 644 "\${pkgdir}/boot/vmlinuz-linux-acer-sw1-011"
+          }
+          EOF
 
-          # ── Generar PKGBUILD con printf ────────────────────────────────────
-          {
-            printf '# Maintainer: CypherNoodle <github.com/CypherNoodle>\n'
-            printf '# Generado por GitHub Actions - Build #${{ github.run_number }}\n'
-            printf '# Toolchain: ${{ env.COMPILER }} + ${{ env.LINKER }}\n\n'
-            printf 'pkgname=linux-acer-sw1-011\n'
-            printf 'pkgver=%s\n' "$KV"
-            printf 'pkgrel=1\n'
-            printf 'pkgdesc="%s"\n' "$PKGDESC"
-            printf "arch=('x86_64')\n"
-            printf 'url="https://github.com/CypherNoodle/linux-Sw1-011"\n'
-            printf "license=('GPL2')\n"
-            printf "depends=('coreutils' 'kmod' 'mkinitcpio>=0.7')\n"
-            printf 'optdepends=(\n'
-            printf "    'linux-firmware: firmware para hardware periférico'\n"
-            printf ')\n'
-            printf 'provides=("linux=%s")\n' "$KV"
-            printf "options=('!strip')\n\n"
-            printf 'package() {\n'
-            printf '    # staging ya incluye preset y hook, solo copiar\n'
-            printf '    cp -a /staging/. "${pkgdir}/"\n'
-            printf '    chmod 644 "${pkgdir}/boot/vmlinuz-linux-acer-sw1-011"\n'
-            printf '}\n'
-          } > "$PKGOUT/PKGBUILD"
-
-          echo "=== PKGBUILD generado ==="
-          cat "$PKGOUT/PKGBUILD"
-          echo ""
-
-          # ── Ejecutar makepkg dentro de un contenedor Arch Linux ────────────
-          echo "🐳 Ejecutando makepkg en contenedor archlinux:latest..."
-
+          # ── 4. Ejecutar makepkg en Docker ────────────────────────────────
+          echo "🐳 Ejecutando makepkg..."
           docker run --rm \
             -v "$STAGING:/staging:ro" \
             -v "$PKGOUT:/pkgout" \
             archlinux:latest \
             bash -c '
-              set -e
-
-              pacman-key --init
-              pacman-key --populate archlinux
-              pacman -Syu --noconfirm
-              pacman -S --noconfirm --needed base-devel
-
-              # makepkg no puede correr como root; se crea un usuario temporal
-              useradd -m builder
-              chown -R builder:builder /pkgout
-
+              pacman-key --init && pacman-key --populate archlinux
+              pacman -Syu --noconfirm base-devel
+              useradd -m builder && chown -R builder:builder /pkgout
               cd /pkgout
-              su builder -c "makepkg \
-                --noconfirm \
-                --nodeps \
-                --nocheck \
-                --noprogressbar \
-                -f"
+              su builder -c "makepkg --noconfirm --nodeps --nocheck -f"
             '
-
-          echo ""
-          echo "✅ Paquete Arch generado:"
-          ls -lh "$PKGOUT/"*.pkg.tar.* 2>/dev/null || {
-            echo "❌ ERROR: No se encontró el paquete .pkg.tar.*"
-            ls -la "$PKGOUT/"
-            exit 1
-          }
-
-      # ── Fin bloque Arch ────────────────────────────────────────────────────
 
       - name: Generate CHANGELOG
         run: |
@@ -1030,7 +993,7 @@ jobs:
 
           # Bloque de contenido de paquetes según el formato elegido
           generate_packages_section() {
-            FORMAT="${{ env.PACKAGE_FORMAT }}"
+           FORMAT="${{ env.PACKAGE_FORMAT }}"
             if [ "$FORMAT" = "deb" ] || [ "$FORMAT" = "ambos" ]; then
               echo "### Debian / Ubuntu"
               echo "- \`linux-image-*\` — Imagen del kernel"
