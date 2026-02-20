@@ -80,29 +80,19 @@ jobs:
           cp kernel-src/acer_sw1_011_defconfig kernel-src/.config
           cd kernel-src
           
-          # 1. Preparar configuración
           make O=$BUILD_DIR olddefconfig
           
-          # 2. Definir FLAGS de optimización para Silvermont
-          # Estas banderas fuerzan al compilador a usar instrucciones específicas del Atom
+          # Optimizaciones Silvermont
           SILVERMONT_FLAGS="-march=silvermont -mtune=silvermont -O3 -pipe"
           
           LD_OPT=""
           [[ "$LINKER" == "mold" ]] && LD_OPT="LD=ld.mold"
           [[ "$LINKER" == "lld" ]] && LD_OPT="LD=ld.lld"
           
-          echo "🚀 Compilando con optimizaciones Silvermont..."
-          
           if [[ "$COMPILER" == "clang" ]]; then
-            # Optimización máxima con LLVM para Silvermont
-            make O=$BUILD_DIR CC=clang $LD_OPT LLVM=1 LLVM_IAS=1 \
-              KCFLAGS="$SILVERMONT_FLAGS" \
-              -j$(nproc) bzImage modules
+            make O=$BUILD_DIR CC=clang $LD_OPT LLVM=1 LLVM_IAS=1 KCFLAGS="$SILVERMONT_FLAGS" -j$(nproc) bzImage modules
           else
-            # Optimización con GCC + Linker seleccionado
-            make O=$BUILD_DIR CC=gcc $LD_OPT \
-              KCFLAGS="$SILVERMONT_FLAGS" \
-              -j$(nproc) bzImage modules
+            make O=$BUILD_DIR CC=gcc $LD_OPT KCFLAGS="$SILVERMONT_FLAGS" -j$(nproc) bzImage modules
           fi
 
       - name: Build Packages (DEB & Arch)
@@ -120,65 +110,36 @@ jobs:
           make -C "$BUILD_DIR" modules_install INSTALL_MOD_PATH="$STAGING_DIR/usr" INSTALL_MOD_STRIP=1 KERNELRELEASE="$KV" -s
           rm -f "$STAGING_DIR/usr/lib/modules/$KV/build" "$STAGING_DIR/usr/lib/modules/$KV/source"
 
+          # --- ARCH LINUX (SIN EOF PARA EVITAR ERRORES DE IDENTACIÓN) ---
           if [[ "${{ env.PACKAGE_FORMAT }}" == "arch" || "${{ env.PACKAGE_FORMAT }}" == "ambos" ]]; then
             ARCH_STAGING="$GITHUB_WORKSPACE/arch-tmp"
             mkdir -p "$ARCH_STAGING/etc/mkinitcpio.d"
             cp -r "$STAGING_DIR/"* "$ARCH_STAGING/"
-            cat <<EOF > "$ARCH_STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-ALL_config="/etc/mkinitcpio.conf"
-ALL_kver="/boot/vmlinuz-linux-acer-sw1-011"
-PRESETS=('default' 'fallback')
-default_image="/boot/initramfs-linux-acer-sw1-011.img"
-fallback_image="/boot/initramfs-linux-acer-sw1-011-fallback.img"
-fallback_options="-S autodetect"
-EOF
+            
+            # Escribir Preset usando printf
+            printf 'ALL_config="/etc/mkinitcpio.conf"\nALL_kver="/boot/vmlinuz-linux-acer-sw1-011"\nPRESETS=("default" "fallback")\ndefault_image="/boot/initramfs-linux-acer-sw1-011.img"\nfallback_image="/boot/initramfs-linux-acer-sw1-011-fallback.img"\nfallback_options="-S autodetect"\n' > "$ARCH_STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
+
+            # Escribir Hook usando printf
             mkdir -p "$ARCH_STAGING/usr/share/libalpm/hooks"
-            cat <<EOF > "$ARCH_STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
-[Trigger]
-Operation = Install
-Operation = Upgrade
-Type = Package
-Target = linux-acer-sw1-011
-[Action]
-Description = Generando initramfs para linux-acer-sw1-011...
-When = PostTransaction
-Exec = /usr/bin/mkinitcpio -p linux-acer-sw1-011
-EOF
+            printf '[Trigger]\nOperation = Install\nOperation = Upgrade\nType = Package\nTarget = linux-acer-sw1-011\n\n[Action]\nDescription = Generando initramfs para linux-acer-sw1-011...\nWhen = PostTransaction\nExec = /usr/bin/mkinitcpio -p linux-acer-sw1-011\n' > "$ARCH_STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
+
+            # Escribir PKGINFO
             cd "$ARCH_STAGING"
-            {
-              echo "pkgname = linux-acer-sw1-011"
-              echo "pkgver = $KV"
-              echo "pkgrel = 1"
-              echo "pkgdesc = Kernel optimizado Silvermont para Acer SW1-011"
-              echo "arch = x86_64"
-              echo "license = GPL2"
-              echo "depend = coreutils"
-              echo "depend = kmod"
-              echo "depend = mkinitcpio"
-              echo "provides = linux=$KV"
-            } > .PKGINFO
+            printf 'pkgname = linux-acer-sw1-011\npkgver = %s\npkgrel = 1\npkgdesc = Kernel Silvermont para Acer SW1-011\narch = x86_64\nlicense = GPL2\ndepend = coreutils\ndepend = kmod\ndepend = mkinitcpio\nprovides = linux=%s\n' "$KV" "$KV" > .PKGINFO
+            
             tar -I 'zstd -19 -T0' -cf "$PKGOUT/linux-acer-sw1-011-$KV-1-x86_64.pkg.tar.zst" .PKGINFO etc usr boot
           fi
 
+          # --- DEBIAN (SIN EOF) ---
           if [[ "${{ env.PACKAGE_FORMAT }}" == "deb" || "${{ env.PACKAGE_FORMAT }}" == "ambos" ]]; then
             DEB_STAGING="$GITHUB_WORKSPACE/deb-tmp"
             mkdir -p "$DEB_STAGING/DEBIAN"
             cp -r "$STAGING_DIR/boot" "$DEB_STAGING/"
             cp -r "$STAGING_DIR/usr" "$DEB_STAGING/"
-            cat <<EOF > "$DEB_STAGING/DEBIAN/control"
-Package: linux-acer-sw1-011
-Version: $KV
-Section: kernel
-Priority: optional
-Architecture: amd64
-Maintainer: ${{ github.repository_owner }}
-Description: Kernel optimizado Silvermont para Acer One 10
-EOF
-            cat <<EOF > "$DEB_STAGING/DEBIAN/postinst"
-#!/bin/bash
-update-initramfs -c -k $KV
-update-grub
-EOF
+            
+            printf 'Package: linux-acer-sw1-011\nVersion: %s\nSection: kernel\nPriority: optional\nArchitecture: amd64\nMaintainer: %s\nDescription: Kernel optimizado para Acer One 10\n' "$KV" "${{ github.repository_owner }}" > "$DEB_STAGING/DEBIAN/control"
+            printf '#!/bin/bash\nupdate-initramfs -c -k %s\nupdate-grub\n' "$KV" > "$DEB_STAGING/DEBIAN/postinst"
+            
             chmod 755 "$DEB_STAGING/DEBIAN/postinst"
             dpkg-deb --build "$DEB_STAGING" "$PKGOUT/linux-acer-sw1-011-$KV.deb"
           fi
@@ -187,26 +148,16 @@ EOF
         run: |
           cd "$GITHUB_WORKSPACE/release"
           sha256sum * > SHA256SUMS
-          {
-            echo "## Cambios en esta versión"
-            echo "- Kernel: ${{ env.KERNEL_VERSION }}"
-            echo "- Toolchain: ${{ env.COMPILER }} con ${{ env.LINKER }}"
-            echo "- Optimización: Silvermont (-march=silvermont -O3)"
-            echo "### Sumas de verificación SHA256"
-            echo "\`\`\`"
-            cat SHA256SUMS
-            echo "\`\`\`"
-          } > CHANGELOG.md
+          printf '## Cambios en esta versión\n- Kernel: %s\n- Toolchain: %s con %s\n- Optimización: Silvermont\n### Sumas SHA256\n```\n' "${{ env.KERNEL_VERSION }}" "${{ env.COMPILER }}" "${{ env.LINKER }}" > CHANGELOG.md
+          cat SHA256SUMS >> CHANGELOG.md
+          printf '```\n' >> CHANGELOG.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           body_path: release/CHANGELOG.md
-          files: |
-            release/*.deb
-            release/*.pkg.tar.zst
-            release/SHA256SUMS
+          files: release/*
           prerelease: ${{ github.event.inputs.prerelease }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
