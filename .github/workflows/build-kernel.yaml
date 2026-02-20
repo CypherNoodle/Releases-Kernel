@@ -829,128 +829,111 @@ jobs:
             echo "=========================================="
           } > build-metrics.txt
 
-      # ── NUEVO: Empaquetar para Arch Linux ──────────────────────────────────
-      # Reutiliza los binarios ya compilados en el step anterior (bzImage + módulos
-      # que quedaron en el tmpfs /tmp/kernel-build), evitando recompilar el kernel.
-      # makepkg corre dentro de un contenedor Docker archlinux:latest para tener
-      # el entorno correcto sin contaminar el runner Ubuntu.
-
-      - name: Build Arch package (via Docker)
-        if: env.PACKAGE_FORMAT == 'arch' || env.PACKAGE_FORMAT == 'ambos'
+      - name: Build Packages (DEB & Arch)
+        if: env.PACKAGE_FORMAT == 'arch' || env.PACKAGE_FORMAT == 'deb' || env.PACKAGE_FORMAT == 'ambos'
         run: |
-          echo "=========================================="
-          echo "BUILD PAQUETE ARCH LINUX"
-          echo "=========================================="
-
-          STAGING="$GITHUB_WORKSPACE/arch-staging"
-          PKGOUT="$GITHUB_WORKSPACE/arch-packages"
-          mkdir -p "$STAGING/boot"
-          mkdir -p "$PKGOUT"
-
-          # ── 1. Recopilar binarios con nombre unificado ──────────────────
-          echo "📦 Recopilando binarios del kernel..."
-
-          cp /tmp/kernel-build/arch/x86/boot/bzImage \
-            "$STAGING/boot/vmlinuz-linux-acer-sw1-011"
-          cp /tmp/kernel-build/System.map \
-            "$STAGING/boot/System.map-${{ env.KERNEL_VERSION }}"
-          cp /tmp/kernel-build/.config \
-            "$STAGING/boot/config-${{ env.KERNEL_VERSION }}"
-
-          # Instalar módulos
-          echo "📦 Instalando módulos en staging..."
-          make -C /tmp/kernel-build \
-            modules_install \
-            INSTALL_MOD_PATH="$STAGING/usr" \
-            INSTALL_MOD_STRIP=1 \
-            KERNELRELEASE=${{ env.KERNEL_VERSION }} \
-            -s
-
-          # Limpiar symlinks inválidos
-          rm -f "$STAGING/usr/lib/modules/${{ env.KERNEL_VERSION }}/build"
-          rm -f "$STAGING/usr/lib/modules/${{ env.KERNEL_VERSION }}/source"
-
-          # ── 2. Escribir preset y hooks (CORREGIDO) ────────────────────────
-          KV="${{ env.KERNEL_VERSION }}"
-          mkdir -p "$STAGING/etc/mkinitcpio.d"
-          
-          # Corregido: Se usa cat <<EOF para evitar el error del archivo vacío
-          cat <<EOF > "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          ALL_config="/etc/mkinitcpio.conf"
-          ALL_kver="/boot/vmlinuz-linux-acer-sw1-011"
-          PRESETS=('default' 'fallback')
-
-          default_image="/boot/initramfs-linux-acer-sw1-011.img"
-          fallback_image="/boot/initramfs-linux-acer-sw1-011-fallback.img"
-          fallback_options="-S autodetect"
-          EOF
-
-          mkdir -p "$STAGING/usr/share/libalpm/hooks"
-
-          # Hook 60: depmod
-          cat <<EOF > "$STAGING/usr/share/libalpm/hooks/60-linux-acer-sw1-011-depmod.hook"
-          [Trigger]
-          Operation = Install
-          Operation = Upgrade
-          Operation = Remove
-          Type = Path
-          Target = usr/lib/modules/$KV/*
-
-          [Action]
-          Description = Actualizando dependencias de módulos para $KV...
-          When = PostTransaction
-          Exec = /usr/bin/depmod $KV
-          EOF
-
-          # Hook 95: mkinitcpio
-          cat <<EOF > "$STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
-          [Trigger]
-          Operation = Install
-          Operation = Upgrade
-          Type = Package
-          Target = linux-acer-sw1-011
-          
-          [Action]
-          Description = Generando initramfs para linux-acer-sw1-011...
-          When = PostTransaction
-          Exec = /usr/bin/mkinitcpio -p linux-acer-sw1-011
-          EOF
-          
-                    # ── 3. Generar PKGBUILD ──────────────────────────────────────────
-                    PKGDESC="Kernel Linux $KV para Acer SW1-011 (${{ env.COMPILER }})"
+            echo "=========================================="
+            echo "📦 GENERANDO PAQUETES (${{ env.PACKAGE_FORMAT }})"
+            echo "=========================================="
+                
+            KV="${{ env.KERNEL_VERSION }}"
+            BUILD_DIR="/tmp/kernel-build"
+            STAGING_DIR="$GITHUB_WORKSPACE/pkg-staging"
+            PKGOUT="$GITHUB_WORKSPACE/release"
+            mkdir -p "$PKGOUT"
+            rm -rf "$STAGING_DIR"
+            mkdir -p "$STAGING_DIR/boot"
+      
+            # --- 1. PREPARAR ARCHIVOS BASE (Común) ---
+            cp "$BUILD_DIR/arch/x86/boot/bzImage" "$STAGING_DIR/boot/vmlinuz-linux-acer-sw1-011"
+            cp "$BUILD_DIR/System.map" "$STAGING_DIR/boot/System.map-$KV"
+            cp "$BUILD_DIR/.config" "$STAGING_DIR/boot/config-$KV"
+                
+            make -C "$BUILD_DIR" modules_install \
+              INSTALL_MOD_PATH="$STAGING_DIR/usr" \
+              INSTALL_MOD_STRIP=1 \
+              KERNELRELEASE="$KV" -s
+                
+            rm -f "$STAGING_DIR/usr/lib/modules/$KV/build"
+            rm -f "$STAGING_DIR/usr/lib/modules/$KV/source"
+      
+            # --- 2. LÓGICA ARCH LINUX ---
+            if [[ "${{ env.PACKAGE_FORMAT }}" == "arch" || "${{ env.PACKAGE_FORMAT }}" == "ambos" ]]; then
+              echo "✨ Empaquetando para Arch Linux..."
+              ARCH_STAGING="$GITHUB_WORKSPACE/arch-tmp"
+              mkdir -p "$ARCH_STAGING"
+              cp -r "$STAGING_DIR/"* "$ARCH_STAGING/"
                     
-                    cat <<EOF > "$PKGOUT/PKGBUILD"
-          pkgname=linux-acer-sw1-011
-          pkgver=$KV
-          pkgrel=1
-          pkgdesc="$PKGDESC"
-          arch=('x86_64')
-          url="https://github.com/CypherNoodle/linux-Sw1-011"
-          license=('GPL2')
-          depends=('coreutils' 'kmod' 'mkinitcpio>=0.7')
-          provides=("linux=$KV")
-          options=('!strip')
-          
-          package() {
-              cp -a /staging/. "\${pkgdir}/"
-              chmod 644 "\${pkgdir}/boot/vmlinuz-linux-acer-sw1-011"
-          }
-          EOF
-
-          # ── 4. Ejecutar makepkg en Docker ────────────────────────────────
-          echo "🐳 Ejecutando makepkg..."
-          docker run --rm \
-            -v "$STAGING:/staging:ro" \
-            -v "$PKGOUT:/pkgout" \
-            archlinux:latest \
-            bash -c '
-              pacman-key --init && pacman-key --populate archlinux
-              pacman -Syu --noconfirm base-devel
-              useradd -m builder && chown -R builder:builder /pkgout
-              cd /pkgout
-              su builder -c "makepkg --noconfirm --nodeps --nocheck -f"
-            '
-
+              mkdir -p "$ARCH_STAGING/etc/mkinitcpio.d"
+              cat <<EOF > "$ARCH_STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
+            ALL_config="/etc/mkinitcpio.conf"
+            ALL_kver="/boot/vmlinuz-linux-acer-sw1-011"
+            PRESETS=('default' 'fallback')
+            default_image="/boot/initramfs-linux-acer-sw1-011.img"
+            fallback_image="/boot/initramfs-linux-acer-sw1-011-fallback.img"
+            fallback_options="-S autodetect"
+            EOF
+      
+              mkdir -p "$ARCH_STAGING/usr/share/libalpm/hooks"
+              cat <<EOF > "$ARCH_STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
+            [Trigger]
+            Operation = Install
+            Operation = Upgrade
+            Type = Package
+            Target = linux-acer-sw1-011
+            [Action]
+            Description = Generando initramfs para linux-acer-sw1-011...
+            When = PostTransaction
+            Exec = /usr/bin/mkinitcpio -p linux-acer-sw1-011
+            EOF
+      
+                  cd "$ARCH_STAGING"
+                  {
+                    echo "pkgname = linux-acer-sw1-011"
+                    echo "pkgver = $KV"
+                    echo "pkgrel = 1"
+                    echo "pkgdesc = Kernel $KV para Acer SW1-011 (Optimizado)"
+                    echo "url = ${{ github.server_url }}/${{ github.repository }}"
+                    echo "builddate = $(date +%s)"
+                    echo "packager = GitHub Actions"
+                    echo "size = $(du -sb . | cut -f1)"
+                    echo "arch = x86_64"
+                    echo "license = GPL2"
+                    echo "depend = coreutils"
+                    echo "depend = kmod"
+                    echo "depend = mkinitcpio"
+                    echo "provides = linux=$KV"
+                  } > .PKGINFO
+      
+                  tar -I 'zstd -19 -T0' -cf "$PKGOUT/linux-acer-sw1-011-$KV-1-x86_64.pkg.tar.zst" .PKGINFO etc usr boot
+                fi
+      
+                # --- 3. LÓGICA DEBIAN ---
+                if [[ "${{ env.PACKAGE_FORMAT }}" == "deb" || "${{ env.PACKAGE_FORMAT }}" == "ambos" ]]; then
+                  echo "✨ Empaquetando para Debian/Ubuntu..."
+                  DEB_STAGING="$GITHUB_WORKSPACE/deb-tmp"
+                  mkdir -p "$DEB_STAGING/DEBIAN"
+                  cp -r "$STAGING_DIR/boot" "$DEB_STAGING/"
+                  cp -r "$STAGING_DIR/usr" "$DEB_STAGING/"
+                  
+                  cat <<EOF > "$DEB_STAGING/DEBIAN/control"
+            Package: linux-acer-sw1-011
+            Version: $KV
+            Section: kernel
+            Priority: optional
+            Architecture: amd64
+            Maintainer: ${{ github.repository_owner }}
+            Description: Kernel Linux $KV optimizado para Acer One 10
+            EOF
+                  cat <<EOF > "$DEB_STAGING/DEBIAN/postinst"
+            #!/bin/bash
+            update-initramfs -c -k $KV
+            update-grub
+            EOF
+                  chmod 755 "$DEB_STAGING/DEBIAN/postinst"
+                  dpkg-deb --build "$DEB_STAGING" "$PKGOUT/linux-acer-sw1-011-$KV.deb"
+                fi
+                
       - name: Generate CHANGELOG
         run: |
           BUILD_TIME="${{ env.BUILD_TIME }}"
