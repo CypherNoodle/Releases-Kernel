@@ -1002,6 +1002,11 @@ jobs:
           # Usar printf evita problemas de heredoc indentado en YAML y de
           # /dev/stdin no disponible en el entorno fakeroot de makepkg.
           KV="${{ env.KERNEL_VERSION }}"
+          
+          # Arch Linux no permite guiones en pkgver
+          # Convertir "7.0.0-rc1" → "7.0.0rc1" para pkgver
+          # Pero mantener la versión completa para archivos del kernel
+          PKGVER="${KV//-/}"  # Elimina TODOS los guiones
 
           mkdir -p "$STAGING/etc/mkinitcpio.d"
           printf 'ALL_config="/etc/mkinitcpio.conf"\n' > "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
@@ -1041,7 +1046,7 @@ jobs:
             printf '# Generado por GitHub Actions - Build #${{ github.run_number }}\n'
             printf '# Toolchain: ${{ env.COMPILER }} + ${{ env.LINKER }}\n\n'
             printf 'pkgname=linux-acer-sw1-011\n'
-            printf 'pkgver=%s\n' "$KV"
+            printf 'pkgver=%s\n' "$PKGVER"
             printf 'pkgrel=1\n'
             printf 'pkgdesc="%s"\n' "$PKGDESC"
             printf "arch=('x86_64')\n"
@@ -1051,7 +1056,7 @@ jobs:
             printf 'optdepends=(\n'
             printf "    'linux-firmware: firmware para hardware periférico'\n"
             printf ')\n'
-            printf 'provides=("linux=%s")\n' "$KV"
+            printf 'provides=("linux=%s")\n' "$PKGVER"
             printf "options=('!strip')\n\n"
             printf 'package() {\n'
             printf '    # staging ya incluye preset y hook, solo copiar\n'
