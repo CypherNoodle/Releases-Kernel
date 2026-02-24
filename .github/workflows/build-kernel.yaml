@@ -402,6 +402,24 @@ jobs:
               echo "   ℹ️  Aplicando defaults para nuevas opciones (no-interactivo)..."
 
               make -s olddefconfig > /dev/null 2>&1
+              
+              echo ""
+              echo "🔍 Verificando opciones CRÍTICAS después de olddefconfig..."
+              CRITICAL_MISSING=""
+              
+              grep -q "CONFIG_INTEL_INT0002_VGPIO=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_INTEL_INT0002_VGPIO"
+              grep -q "CONFIG_INTEL_SCU=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_INTEL_SCU"
+              grep -q "CONFIG_INTEL_SCU_IPC=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_INTEL_SCU_IPC"
+              grep -q "CONFIG_MMC_SDHCI_ACPI=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_MMC_SDHCI_ACPI"
+              grep -q "CONFIG_EXT4_FS=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_EXT4_FS"
+              grep -q "CONFIG_PINCTRL_CHERRYVIEW=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_PINCTRL_CHERRYVIEW"
+              
+              if [ -n "$CRITICAL_MISSING" ]; then
+                echo "❌ ERROR: Opciones críticas desactivadas: $CRITICAL_MISSING"
+                echo "El caché de .config está corrupto o desactualizado."
+                echo "Ve a Settings → Actions → Caches y elimina todos los cachés 'config-*'"
+                exit 1
+              fi
 
               echo "   ⚠️  El caché puede estar parcialmente invalidado por las nuevas opciones"
             else
@@ -461,6 +479,54 @@ jobs:
             else
               echo "   ✅ Sin nuevas opciones - defconfig está completo!"
               echo "   ✅ Omitiendo olddefconfig (preserva timestamps)"
+            fi
+
+            echo ""
+            echo "🔍 Verificando opciones CRÍTICAS para Cherry Trail..."
+            CRITICAL_MISSING=""
+
+            # Drivers Intel críticos para inicialización de hardware
+            grep -q "CONFIG_INTEL_INT0002_VGPIO=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_INTEL_INT0002_VGPIO"
+            grep -q "CONFIG_INTEL_SCU=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_INTEL_SCU"
+            grep -q "CONFIG_INTEL_SCU_IPC=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_INTEL_SCU_IPC"
+            grep -q "CONFIG_INTEL_SCU_PCI=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_INTEL_SCU_PCI"
+            
+            # IOMMU (necesario para eMMC)
+            grep -q "CONFIG_INTEL_IOMMU=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_INTEL_IOMMU"
+            
+            # eMMC/SDHCI
+            grep -q "CONFIG_MMC_SDHCI_ACPI=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_MMC_SDHCI_ACPI"
+            grep -q "CONFIG_MMC_BLOCK=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_MMC_BLOCK"
+            
+            # Filesystem
+            grep -q "CONFIG_EXT4_FS=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_EXT4_FS"
+            
+            # Pinctrl (necesario para GPIO/interrupciones)
+            grep -q "CONFIG_PINCTRL_CHERRYVIEW=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_PINCTRL_CHERRYVIEW"
+            grep -q "CONFIG_PINCTRL_BAYTRAIL=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_PINCTRL_BAYTRAIL"
+
+            if [ -n "$CRITICAL_MISSING" ]; then
+              echo ""
+              echo "❌❌❌ ERROR CRÍTICO ❌❌❌"
+              echo ""
+              echo "Las siguientes opciones están en el defconfig pero fueron DESACTIVADAS"
+              echo "por olddefconfig debido a dependencias faltantes:"
+              echo ""
+              for opt in $CRITICAL_MISSING; do
+                echo "  ❌ $opt"
+              done
+              echo ""
+              echo "Esto causará KERNEL PANIC al bootear (el kernel no detectará el disco eMMC)."
+              echo ""
+              echo "SOLUCIÓN: Agregar las dependencias faltantes al defconfig."
+              echo "Ejecuta localmente:"
+              echo "  make ARCH=x86 acer_sw1_011_defconfig"
+              echo "  make ARCH=x86 menuconfig  # Habilita las opciones críticas"
+              echo "  grep -E 'INTEL_INT0002|INTEL_SCU|MMC_SDHCI|PINCTRL' .config"
+              echo ""
+              exit 1
+            else
+              echo "   ✅ Todas las opciones críticas están habilitadas!"
             fi
           fi
 
@@ -595,6 +661,49 @@ jobs:
           make -s olddefconfig > /dev/null 2>&1
           make -s listnewconfig 2>/dev/null | grep -q '^CONFIG' \
             && make -s olddefconfig > /dev/null 2>&1 || true
+
+          echo ""
+          echo "🔍 VERIFICACIÓN FINAL de opciones críticas antes de compilar..."
+          CRITICAL_MISSING=""
+          
+          grep -q "CONFIG_INTEL_INT0002_VGPIO=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING INTEL_INT0002_VGPIO"
+          grep -q "CONFIG_INTEL_SCU=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING INTEL_SCU"
+          grep -q "CONFIG_INTEL_SCU_IPC=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING INTEL_SCU_IPC"
+          grep -q "CONFIG_INTEL_SCU_PCI=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING INTEL_SCU_PCI"
+          grep -q "CONFIG_INTEL_IOMMU=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING INTEL_IOMMU"
+          grep -q "CONFIG_MMC_SDHCI_ACPI=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING MMC_SDHCI_ACPI"
+          grep -q "CONFIG_MMC_BLOCK=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING MMC_BLOCK"
+          grep -q "CONFIG_EXT4_FS=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING EXT4_FS"
+          grep -q "CONFIG_PINCTRL_CHERRYVIEW=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING PINCTRL_CHERRYVIEW"
+          grep -q "CONFIG_PINCTRL_BAYTRAIL=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING PINCTRL_BAYTRAIL"
+          
+          if [ -n "$CRITICAL_MISSING" ]; then
+            echo ""
+            echo "❌❌❌ FALLO CRÍTICO DE CONFIGURACIÓN ❌❌❌"
+            echo ""
+            echo "Las siguientes opciones críticas NO ESTÁN HABILITADAS en .config:"
+            for opt in $CRITICAL_MISSING; do
+              echo "  ❌ CONFIG_$opt"
+              grep "CONFIG_$opt" .config || echo "     (no aparece en .config)"
+            done
+            echo ""
+            echo "Sin estas opciones, el kernel NO PODRÁ BOOTEAR (kernel panic)."
+            echo ""
+            echo "Causa probable:"
+            echo "  - Faltan dependencias en el defconfig"
+            echo "  - El .config cacheado está corrupto"
+            echo ""
+            echo "SOLUCIÓN:"
+            echo "  1. Ve a Settings → Actions → Caches"
+            echo "  2. Elimina TODOS los cachés que empiecen con 'config-'"
+            echo "  3. Verifica que el defconfig tenga las dependencias necesarias"
+            echo "  4. Vuelve a correr el workflow"
+            echo ""
+            exit 1
+          fi
+          
+          echo "✅ Todas las opciones críticas verificadas y habilitadas!"
+          echo ""
 
           START_TIME=$(date +%s)
 
