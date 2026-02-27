@@ -20,7 +20,7 @@ on:
           - deb
           - arch
           - ambos
-        default: deb
+        default: ambos
       prerelease:
         description: 'Marcar como pre-release'
         required: false
