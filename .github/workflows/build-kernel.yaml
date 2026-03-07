@@ -493,9 +493,6 @@ jobs:
       - name: Build Arch package (via Docker)
         if: env.PACKAGE_FORMAT == 'arch' || env.PACKAGE_FORMAT == 'ambos'
         run: |
-
-      - name: Generate CHANGELOG
-        run: |
           # 1. Creamos una versión compatible con Arch (reemplazando guiones) usando Bash puro
           SAFE_VERSION=$(echo "${{ env.KERNEL_VERSION }}" | tr '-' '_')
 
