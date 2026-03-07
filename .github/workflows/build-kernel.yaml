@@ -416,7 +416,7 @@ jobs:
           CRITICAL_MISSING=""
 
           for opt in CONFIG_INTEL_INT0002_VGPIO CONFIG_INTEL_SCU CONFIG_MMC_SDHCI_ACPI CONFIG_EXT4_FS CONFIG_PINCTRL_CHERRYVIEW; do
-            grep -q "$opt=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING $opt"
+            grep -qE "^$opt=[ym]" .config || CRITICAL_MISSING="$CRITICAL_MISSING $opt"
           done
 
           if [ -n "$CRITICAL_MISSING" ]; then
@@ -442,4 +442,104 @@ jobs:
           fi
 
           if [ "${{ env.LINKER }}" = "mold" ]; then export LDFLAGS="-fuse-ld=mold"; fi
-          if [ "${{ env.LINKER }}" = "lld" ]; then
+          if [ "${{ env.LINKER }}" = "lld" ]; then export LDFLAGS="-fuse-ld=lld"; fi
+
+          START_TIME=$(date +%s)
+          make -j$(($(nproc) + 2)) KERNELRELEASE=${{ env.KERNEL_VERSION }} bzImage modules
+          echo "BUILD_TIME=$(($(date +%s) - START_TIME))" >> $GITHUB_ENV
+
+      - name: Package .deb
+        if: env.PACKAGE_FORMAT == 'deb' || env.PACKAGE_FORMAT == 'ambos'
+        working-directory: kernel-src
+        run: |
+          make -s -j$(($(nproc) + 2)) KERNELRELEASE=${{ env.KERNEL_VERSION }} \
+          KDEB_PKGVERSION=${{ env.KERNEL_VERSION }}-1 KDEB_COMPRESS=xz bindeb-pkg
+
+      - name: Show ccache statistics
+        if: always()
+        run: |
+          ccache --show-stats
+
+      - name: Save ccache
+        uses: actions/cache/save@v5
+        if: always()
+        with:
+          path: ~/.ccache
+          key: ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ github.run_id }}
+
+      - name: Save kernel build tools
+        uses: actions/cache/save@v5
+        if: always() && steps.kernel-tools-restore.outputs.cache-hit != 'true'
+        with:
+          path: |
+            kernel-src/scripts/basic/
+            kernel-src/scripts/kconfig/
+            kernel-src/scripts/mod/
+            kernel-src/tools/objtool/
+          key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
+
+      - name: Save generated .config
+        uses: actions/cache/save@v5
+        if: always() && steps.config-restore.outputs.cache-hit != 'true'
+        with:
+          path: kernel-src/.config
+          key: config-${{ env.COMPILER }}-${{ env.CONFIG_SOURCE }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig', 'kernel-src/.config.x86_64') }}-v3
+
+      - name: Save build metrics
+        if: always()
+        run: |
+          echo "Build metrics saved." > build-metrics.txt
+
+      - name: Build Arch package (via Docker)
+        if: env.PACKAGE_FORMAT == 'arch' || env.PACKAGE_FORMAT == 'ambos'
+        run: |
+          STAGING="$GITHUB_WORKSPACE/arch-staging"
+          PKGOUT="$GITHUB_WORKSPACE/arch-packages"
+          mkdir -p "$STAGING/boot" "$PKGOUT"
+          cp /tmp/kernel-build/arch/x86/boot/bzImage "$STAGING/boot/vmlinuz-${{ env.KERNEL_VERSION }}"
+          make -C /tmp/kernel-build modules_install INSTALL_MOD_PATH="$STAGING/usr" INSTALL_MOD_STRIP=1 KERNELRELEASE=${{ env.KERNEL_VERSION }} -s
+          printf "pkgname=linux-acer-sw1-011\npkgver=${{ env.KERNEL_VERSION//-/}}\npkgrel=1\narch=('x86_64')\npackage() { cp -a /staging/. \"\${pkgdir}/\"; }\n" > "$PKGOUT/PKGBUILD"
+          docker run --rm -v "$STAGING:/staging:ro" -v "$PKGOUT:/pkgout" archlinux:latest bash -c "pacman -Syu --noconfirm base-devel && useradd -m b && chown -R b /pkgout && cd /pkgout && su b -c 'makepkg --noconfirm --nodeps'"
+
+      - name: Generate CHANGELOG
+        run: |
+          {
+            echo "# Linux Kernel ${{ env.KERNEL_VERSION }}"
+            echo "- **Toolchain:** ${{ env.COMPILER }} + ${{ env.LINKER }}"
+            echo "- **Fuente de configuración:** ${{ env.CONFIG_SOURCE }}"
+            echo "- **Tiempo de build:** $((${{ env.BUILD_TIME }} / 60)) min"
+            echo "## Cambios"
+            if [ -d "kernel-git-backup" ]; then
+              git -C kernel-git-backup log --reverse -n 20 --pretty=format:"- %h %s" || echo "- Sin historial"
+            fi
+          } > CHANGELOG.md
+
+      - name: Collect release files
+        run: |
+          mkdir -p release
+          cp /tmp/*.deb release/ 2>/dev/null || true
+          cp arch-packages/*.pkg.tar.* release/ 2>/dev/null || true
+          cp CHANGELOG.md release/
+          cd release && sha256sum * > SHA256SUMS.txt
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kernel-${{ env.KERNEL_VERSION }}-build-${{ github.run_number }}
+          path: release/*
+
+      - name: Create or Update GitHub Release
+        run: |
+          RELEASE_TITLE="Linux Kernel ${{ env.KERNEL_VERSION }} (${{ env.CONFIG_SOURCE }})"
+          gh release create "${{ env.RELEASE_TAG }}" release/* \
+            --title "$RELEASE_TITLE" \
+            --notes-file CHANGELOG.md \
+            ${{ github.event.inputs.prerelease == 'true' && '--prerelease' || '--latest' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Build summary
+        if: always()
+        run: |
+          echo "Workflow completado. Fuente: ${{ env.CONFIG_SOURCE }}"
