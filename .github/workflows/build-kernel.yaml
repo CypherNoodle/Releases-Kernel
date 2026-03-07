@@ -493,14 +493,23 @@ jobs:
       - name: Build Arch package (via Docker)
         if: env.PACKAGE_FORMAT == 'arch' || env.PACKAGE_FORMAT == 'ambos'
         run: |
+
+      - name: Generate CHANGELOG
+        run: |
+          # 1. Creamos una versión compatible con Arch (reemplazando guiones) usando Bash puro
+          SAFE_VERSION=$(echo "${{ env.KERNEL_VERSION }}" | tr '-' '_')
+
           STAGING="$GITHUB_WORKSPACE/arch-staging"
           PKGOUT="$GITHUB_WORKSPACE/arch-packages"
           mkdir -p "$STAGING/boot" "$PKGOUT"
+
           cp /tmp/kernel-build/arch/x86/boot/bzImage "$STAGING/boot/vmlinuz-${{ env.KERNEL_VERSION }}"
           make -C /tmp/kernel-build modules_install INSTALL_MOD_PATH="$STAGING/usr" INSTALL_MOD_STRIP=1 KERNELRELEASE=${{ env.KERNEL_VERSION }} -s
-          printf "pkgname=linux-acer-sw1-011\npkgver=${{ env.KERNEL_VERSION//-/}}\npkgrel=1\narch=('x86_64')\npackage() { cp -a /staging/. \"\${pkgdir}/\"; }\n" > "$PKGOUT/PKGBUILD"
-          docker run --rm -v "$STAGING:/staging:ro" -v "$PKGOUT:/pkgout" archlinux:latest bash -c "pacman -Syu --noconfirm base-devel && useradd -m b && chown -R b /pkgout && cd /pkgout && su b -c 'makepkg --noconfirm --nodeps'"
 
+          # 2. Usamos la variable SAFE_VERSION en el PKGBUILD
+          printf "pkgname=linux-acer-sw1-011\npkgver=${SAFE_VERSION}\npkgrel=1\narch=('x86_64')\npackage() { cp -a /staging/. \"\${pkgdir}/\"; }\n" > "$PKGOUT/PKGBUILD"
+          
+          docker run --rm -v "$STAGING:/staging:ro" -v "$PKGOUT:/pkgout" archlinux:latest bash -c "pacman -Syu --noconfirm base-devel && useradd -m b && chown -R b /pkgout && cd /pkgout && su b -c 'makepkg --noconfirm --nodeps'"
       - name: Generate CHANGELOG
         run: |
           {
