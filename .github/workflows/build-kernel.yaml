@@ -21,6 +21,14 @@ on:
           - arch
           - ambos
         default: ambos
+      config_source:
+        description: 'Fuente de la configuración (.config)'
+        required: false
+        type: choice
+        options:
+          - sw1-011
+          - .config
+        default: sw1-011
       prerelease:
         description: 'Marcar como pre-release'
         required: false
@@ -154,6 +162,11 @@ jobs:
           echo "compiler=$COMPILER" >> $GITHUB_OUTPUT
           echo "linker=$LINKER" >> $GITHUB_OUTPUT
           echo "Toolchain seleccionado: $COMPILER + $LINKER"
+
+          # Config Source
+          CONFIG_SOURCE="${{ github.event.inputs.config_source }}"
+          if [ -z "$CONFIG_SOURCE" ]; then CONFIG_SOURCE="sw1-011"; fi
+          echo "CONFIG_SOURCE=$CONFIG_SOURCE" >> $GITHUB_ENV
 
           # Formato de paquete — para el schedule se usa 'deb' por defecto
           PACKAGE_FORMAT="${{ github.event.inputs.package_format }}"
@@ -289,9 +302,9 @@ jobs:
         id: config-restore
         with:
           path: kernel-src/.config
-          key: config-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig') }}-v2
+          key: config-${{ env.COMPILER }}-${{ env.CONFIG_SOURCE }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig', 'kernel-src/.config.x86_64') }}-v3
           restore-keys: |
-            config-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-
+            config-${{ env.COMPILER }}-${{ env.CONFIG_SOURCE }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-
 
       - name: Check cache restoration
         run: |
@@ -303,7 +316,7 @@ jobs:
           echo "Build número: #${{ github.run_number }}"
           echo "Branch: ${{ github.ref_name }}"
           echo "Release existe: ${{ steps.check_release.outputs.exists }}"
-          echo "Config: acer_sw1_011_defconfig"
+          echo "Config Source: ${{ env.CONFIG_SOURCE }}"
           echo "Toolchain: ${{ env.COMPILER }} + ${{ env.LINKER }}"
           echo "Formato de paquete: ${{ env.PACKAGE_FORMAT }}"
           echo ""
@@ -326,15 +339,11 @@ jobs:
           fi
           echo ""
 
-          echo "2️⃣  KERNEL .CONFIG (específico del compilador):"
+          echo "2️⃣  KERNEL .CONFIG (específico de fuente):"
           if [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
-            echo "   ✅ RESTAURADO: .config cacheado para ${{ env.COMPILER }}"
-            if [ -f kernel-src/.config ]; then
-              echo "   📅 Timestamp: $(stat -c %y kernel-src/.config 2>/dev/null || stat -f %Sm kernel-src/.config)"
-            fi
+            echo "   ✅ RESTAURADO: .config cacheado para ${{ env.CONFIG_SOURCE }}"
           else
-            echo "   ⚠️  SE GENERARÁ: .config nuevo desde defconfig para ${{ env.COMPILER }}"
-            echo "   ⚠️  Esto INVALIDARÁ entradas del ccache (cambian los timestamps)"
+            echo "   ⚠️  SE GENERARÁ: .config nuevo desde ${{ env.CONFIG_SOURCE }}"
           fi
           echo ""
 
@@ -345,19 +354,6 @@ jobs:
             echo "   ❌ NO ENCONTRADO"
           fi
           echo ""
-
-          if [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ] && [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
-            echo "⚡ EXCELENTE! Caché + Config cacheado - Build debería tomar ~10-15 minutos"
-          elif [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ]; then
-            echo "⚠️  ADVERTENCIA: Caché disponible PERO el config será regenerado"
-            echo "   Esto cambia los timestamps del .config e invalida la mayoría de entradas del ccache"
-            echo "   Tiempo estimado de build: ~40-50 minutos (casi como sin caché)"
-            echo "💡 La próxima build será rápida una vez que el .config esté cacheado"
-          else
-            echo "⏰ SIN CACHÉ - La build completa tomará ~50-60 minutos"
-            echo "💡 Las builds siguientes serán mucho más rápidas!"
-          fi
-          echo "=========================================="
 
       - name: Configure ccache
         run: |
@@ -372,70 +368,26 @@ jobs:
 
           ccache --zero-stats
 
-          echo "=== Configuración de Ccache ==="
-          ccache --show-config | grep -E "(max_size|compression|sloppiness|temporary_dir)"
-          echo ""
-          echo "=== Estadísticas iniciales (reseteadas) ==="
-          ccache --show-stats
-          echo ""
-          echo "=== Verificando que ccache funciona ==="
-          export PATH="/usr/lib/ccache:$PATH"
-          export CCACHE_DIR="$HOME/.ccache"
-          which gcc
-          which g++
-          gcc --version | head -1
-
       - name: Prepare kernel configuration
         working-directory: kernel-src
         run: |
-          echo "🔧 Configurando kernel para ${{ env.COMPILER }}..."
+          echo "🔧 Configurando kernel para ${{ env.COMPILER }} usando fuente ${{ env.CONFIG_SOURCE }}..."
 
           if [ -f .config ] && [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
-            echo "✅ Usando .config cacheado para ${{ env.COMPILER }} (preserva timestamps para ccache)"
-            echo "   Omitiendo configuración para preservar validez del caché"
-
-            if make -s listnewconfig | grep -q '^CONFIG'; then
-              echo "   ⚠️  ADVERTENCIA: Nuevas opciones de config detectadas:"
-              make -s listnewconfig | head -10
-              echo ""
-              echo "   ℹ️  Considera agregar estas opciones a acer_sw1_011_defconfig"
-              echo "   ℹ️  Aplicando defaults para nuevas opciones (no-interactivo)..."
-
-              make -s olddefconfig > /dev/null 2>&1
-              
-              echo ""
-              echo "🔍 Verificando opciones CRÍTICAS después de olddefconfig..."
-              CRITICAL_MISSING=""
-              
-              grep -q "CONFIG_INTEL_INT0002_VGPIO=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_INTEL_INT0002_VGPIO"
-              grep -q "CONFIG_INTEL_SCU=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_INTEL_SCU"
-              grep -q "CONFIG_INTEL_SCU_IPC=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_INTEL_SCU_IPC"
-              grep -q "CONFIG_MMC_SDHCI_ACPI=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_MMC_SDHCI_ACPI"
-              grep -q "CONFIG_EXT4_FS=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_EXT4_FS"
-              grep -q "CONFIG_PINCTRL_CHERRYVIEW=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_PINCTRL_CHERRYVIEW"
-              
-              if [ -n "$CRITICAL_MISSING" ]; then
-                echo "❌ ERROR: Opciones críticas desactivadas: $CRITICAL_MISSING"
-                echo "El caché de .config está corrupto o desactualizado."
-                echo "Ve a Settings → Actions → Caches y elimina todos los cachés 'config-*'"
+            echo "✅ Usando .config cacheado (preserva timestamps para ccache)"
+            make -s olddefconfig > /dev/null 2>&1
+          else
+            if [ "${{ env.CONFIG_SOURCE }}" == ".config" ]; then
+              if [ -f ".config.x86_64" ]; then
+                echo "⚙️  Usando archivo .config.x86_64 como base..."
+                cp .config.x86_64 .config
+              else
+                echo "❌ ERROR: .config.x86_64 no encontrado en la raíz!"
                 exit 1
               fi
-
-              echo "   ⚠️  El caché puede estar parcialmente invalidado por las nuevas opciones"
             else
-              echo "   ✅ Sin nuevas opciones de config - el caché es 100% válido"
-            fi
-          else
-            echo "⚙️  Generando config nuevo desde defconfig para ${{ env.COMPILER }}"
-
-            if [ -f arch/x86/configs/acer_sw1_011_defconfig ]; then
-              echo "✅ Usando defconfig personalizado: acer_sw1_011_defconfig"
+              echo "⚙️  Generando config nuevo desde acer_sw1_011_defconfig (sw1-011)"
               make -s acer_sw1_011_defconfig
-            else
-              echo "❌ ERROR: acer_sw1_011_defconfig no encontrado!"
-              echo "Defconfigs disponibles en arch/x86/configs/:"
-              ls -1 arch/x86/configs/ | grep defconfig | head -10
-              exit 1
             fi
 
             echo ""
@@ -449,105 +401,29 @@ jobs:
             scripts/config --set-val CONFIG_DEBUG_INFO_NONE y
 
             scripts/config --disable CONFIG_LOCALVERSION_AUTO
-
             scripts/config --enable CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
-            scripts/config --disable CONFIG_GCOV_KERNEL
-            scripts/config --disable CONFIG_KCOV
 
             if [ "${{ env.COMPILER }}" = "clang" ]; then
-              echo "⚙️  Aplicando opciones específicas de Clang..."
               scripts/config --disable CONFIG_LTO_CLANG_FULL
-              scripts/config --disable CONFIG_LTO_CLANG_THIN
               scripts/config --enable CONFIG_LTO_NONE
-              scripts/config --disable CONFIG_CFI_CLANG
-              scripts/config --enable CONFIG_RANDSTRUCT_NONE
-              scripts/config --disable CONFIG_RANDSTRUCT_FULL
-              scripts/config --disable CONFIG_RANDSTRUCT_PERFORMANCE
-              scripts/config --disable CONFIG_KMSAN
             fi
 
-            echo ""
-            echo "⚙️  Verificando nuevas opciones de config..."
-
-            if make -s listnewconfig | grep -q '^CONFIG'; then
-              echo "   ⚠️  Nuevas opciones encontradas (no están en defconfig):"
-              make -s listnewconfig | head -10
-              echo ""
-              echo "   ℹ️  Aplicando defaults para nuevas opciones (no-interactivo)..."
-
-              make -s olddefconfig > /dev/null 2>&1
-            else
-              echo "   ✅ Sin nuevas opciones - defconfig está completo!"
-              echo "   ✅ Omitiendo olddefconfig (preserva timestamps)"
-            fi
-
-            echo ""
-            echo "🔍 Verificando opciones CRÍTICAS para Cherry Trail..."
-            CRITICAL_MISSING=""
-
-            # Drivers Intel críticos para inicialización de hardware
-            grep -q "CONFIG_INTEL_INT0002_VGPIO=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_INTEL_INT0002_VGPIO"
-            grep -q "CONFIG_INTEL_SCU=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_INTEL_SCU"
-            grep -q "CONFIG_INTEL_SCU_IPC=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_INTEL_SCU_IPC"
-            grep -q "CONFIG_INTEL_SCU_PCI=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_INTEL_SCU_PCI"
-            
-            # IOMMU (necesario para eMMC)
-            grep -q "CONFIG_INTEL_IOMMU=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_INTEL_IOMMU"
-            
-            # eMMC/SDHCI
-            grep -q "CONFIG_MMC_SDHCI_ACPI=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_MMC_SDHCI_ACPI"
-            grep -q "CONFIG_MMC_BLOCK=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_MMC_BLOCK"
-            
-            # Filesystem
-            grep -q "CONFIG_EXT4_FS=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_EXT4_FS"
-            
-            # Pinctrl (necesario para GPIO/interrupciones)
-            grep -q "CONFIG_PINCTRL_CHERRYVIEW=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_PINCTRL_CHERRYVIEW"
-            grep -q "CONFIG_PINCTRL_BAYTRAIL=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING CONFIG_PINCTRL_BAYTRAIL"
-
-            if [ -n "$CRITICAL_MISSING" ]; then
-              echo ""
-              echo "❌❌❌ ERROR CRÍTICO ❌❌❌"
-              echo ""
-              echo "Las siguientes opciones están en el defconfig pero fueron DESACTIVADAS"
-              echo "por olddefconfig debido a dependencias faltantes:"
-              echo ""
-              for opt in $CRITICAL_MISSING; do
-                echo "  ❌ $opt"
-              done
-              echo ""
-              echo "Esto causará KERNEL PANIC al bootear (el kernel no detectará el disco eMMC)."
-              echo ""
-              echo "SOLUCIÓN: Agregar las dependencias faltantes al defconfig."
-              echo "Ejecuta localmente:"
-              echo "  make ARCH=x86 acer_sw1_011_defconfig"
-              echo "  make ARCH=x86 menuconfig  # Habilita las opciones críticas"
-              echo "  grep -E 'INTEL_INT0002|INTEL_SCU|MMC_SDHCI|PINCTRL' .config"
-              echo ""
-              exit 1
-            else
-              echo "   ✅ Todas las opciones críticas están habilitadas!"
-            fi
+            make -s olddefconfig > /dev/null 2>&1
           fi
 
           echo ""
-          echo "=== Resumen de configuración ==="
-          echo "Config usado: acer_sw1_011_defconfig"
-          echo "Config cacheado: ${{ steps.config-restore.outputs.cache-hit }}"
-          echo "Compilador: ${{ env.COMPILER }}"
-          echo "Linker: ${{ env.LINKER }}"
-          echo "Debug info: desactivado"
-          echo "Localversion auto: desactivado"
-          if [ "${{ env.COMPILER }}" = "clang" ]; then
-            echo "Optimización: x86-64-v2 (optimización genérica)"
-            echo "LTO: desactivado (establecido explícitamente)"
-            echo "CFI: desactivado (establecido explícitamente)"
-            echo "AutoFDO: desactivado (desde defconfig)"
-            echo "KMSAN: desactivado (establecido explícitamente)"
-            echo "RANDSTRUCT: ninguno (establecido explícitamente)"
-          else
-            echo "Optimización: Intel x5-Z8300 (Silvermont)"
+          echo "🔍 Verificando opciones CRÍTICAS para Cherry Trail..."
+          CRITICAL_MISSING=""
+
+          for opt in CONFIG_INTEL_INT0002_VGPIO CONFIG_INTEL_SCU CONFIG_MMC_SDHCI_ACPI CONFIG_EXT4_FS CONFIG_PINCTRL_CHERRYVIEW; do
+            grep -q "$opt=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING $opt"
+          done
+
+          if [ -n "$CRITICAL_MISSING" ]; then
+            echo "❌ ERROR CRÍTICO: Faltan opciones esenciales: $CRITICAL_MISSING"
+            exit 1
           fi
+          echo "   ✅ Todas las opciones críticas verificadas!"
 
       - name: Compile kernel
         working-directory: kernel-src
@@ -557,894 +433,13 @@ jobs:
 
           if [ "${{ env.COMPILER }}" = "clang" ]; then
             export CC="ccache clang"
-            export CXX="ccache clang++"
-            export HOSTCC="clang"
-            export HOSTCXX="clang++"
             export LLVM=1
             export LLVM_IAS=1
-
-            CLANG_FLAGS="-O2 -march=x86-64-v2 -mtune=generic -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128"
-
-            FRAME_POINTER_BLOCKERS=""
-            if grep -q "CONFIG_FRAME_POINTER=y" .config; then
-              FRAME_POINTER_BLOCKERS="CONFIG_FRAME_POINTER=y"
-            fi
-            if grep -q "CONFIG_FUNCTION_TRACER=y" .config; then
-              FRAME_POINTER_BLOCKERS="$FRAME_POINTER_BLOCKERS CONFIG_FUNCTION_TRACER=y"
-            fi
-            if grep -q "CONFIG_STACK_TRACER=y" .config; then
-              FRAME_POINTER_BLOCKERS="$FRAME_POINTER_BLOCKERS CONFIG_STACK_TRACER=y"
-            fi
-
-            if [ -z "$FRAME_POINTER_BLOCKERS" ]; then
-              CLANG_FLAGS="$CLANG_FLAGS -fomit-frame-pointer"
-              echo "✅ Optimización de frame pointer habilitada (+2-3% rendimiento)"
-            else
-              echo "⚠️  Omitiendo -fomit-frame-pointer por: $FRAME_POINTER_BLOCKERS"
-              echo "   Estas features requieren frame pointers para funcionar correctamente"
-            fi
-
-            export KCFLAGS="$CLANG_FLAGS"
-
-            if [ "${{ env.LINKER }}" = "lld" ]; then
-              export LDFLAGS="-fuse-ld=lld -Wl,--hash-style=gnu -Wl,--build-id=sha1"
-              echo "✅ Usando Clang + lld"
-            fi
+            export KCFLAGS="-O2 -march=x86-64-v2 -mtune=generic -pipe"
           else
             export CC="ccache gcc"
-            export CXX="ccache g++"
-
-            GCC_FLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16"
-
-            FRAME_POINTER_BLOCKERS=""
-            if grep -q "CONFIG_FRAME_POINTER=y" .config; then
-              FRAME_POINTER_BLOCKERS="CONFIG_FRAME_POINTER=y"
-            fi
-            if grep -q "CONFIG_FUNCTION_TRACER=y" .config; then
-              FRAME_POINTER_BLOCKERS="$FRAME_POINTER_BLOCKERS CONFIG_FUNCTION_TRACER=y"
-            fi
-            if grep -q "CONFIG_STACK_TRACER=y" .config; then
-              FRAME_POINTER_BLOCKERS="$FRAME_POINTER_BLOCKERS CONFIG_STACK_TRACER=y"
-            fi
-
-            if [ -z "$FRAME_POINTER_BLOCKERS" ]; then
-              GCC_FLAGS="$GCC_FLAGS -fomit-frame-pointer"
-              echo "✅ Optimización de frame pointer habilitada (+2-3% rendimiento)"
-            else
-              echo "⚠️  Omitiendo -fomit-frame-pointer por: $FRAME_POINTER_BLOCKERS"
-              echo "   Estas features requieren frame pointers para funcionar correctamente"
-            fi
-
-            export KCFLAGS="$GCC_FLAGS"
-
-            if [ "${{ env.LINKER }}" = "mold" ]; then
-              if command -v mold &> /dev/null; then
-                export LDFLAGS="-fuse-ld=mold -Wl,--hash-style=gnu -Wl,--build-id=sha1"
-                echo "✅ Usando GCC + mold (ultra-rápido)"
-              else
-                echo "⚠️  mold no disponible, usando ld por defecto"
-              fi
-            else
-              echo "✅ Usando GCC + ld (por defecto)"
-            fi
+            export KCFLAGS="-O2 -march=silvermont -mtune=silvermont -pipe"
           fi
 
-          export KCPPFLAGS="-D_FORTIFY_SOURCE=2"
-          export KDOC_WERROR=0
-          export LOCALVERSION=""
-          export KCONFIG_NOTIMESTAMP=1
-          export KBUILD_BUILD_VERSION=1
-
-          NCPUS=$(nproc)
-          JOBS=$((NCPUS + 2))
-
-          echo "=========================================="
-          echo "CONFIGURACIÓN DE BUILD"
-          echo "=========================================="
-          if [ "${{ env.COMPILER }}" = "clang" ]; then
-            echo "Compilador: $(clang --version | head -1)"
-            echo "Arquitectura objetivo: x86-64-v2 (optimización genérica)"
-          else
-            echo "Compilador: $(gcc --version | head -1)"
-            echo "Arquitectura objetivo: Intel x5-Z8300 (Silvermont)"
-          fi
-          echo "Ccache: $(ccache --version | head -1)"
-          echo "Linker: ${{ env.LINKER }}"
-          echo "CPU Cores: $NCPUS"
-          echo "Jobs en paralelo: $JOBS"
-          echo "Versión del kernel: ${{ env.KERNEL_VERSION }}"
-          echo "Formato de paquete: ${{ env.PACKAGE_FORMAT }}"
-          echo "=========================================="
-          echo ""
-
-          echo "🔧 Pre-resolviendo config..."
-          make -s olddefconfig > /dev/null 2>&1
-          make -s listnewconfig 2>/dev/null | grep -q '^CONFIG' \
-            && make -s olddefconfig > /dev/null 2>&1 || true
-
-          echo ""
-          echo "🔍 VERIFICACIÓN FINAL de opciones críticas antes de compilar..."
-          CRITICAL_MISSING=""
-          
-          grep -q "CONFIG_INTEL_INT0002_VGPIO=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING INTEL_INT0002_VGPIO"
-          grep -q "CONFIG_INTEL_SCU=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING INTEL_SCU"
-          grep -q "CONFIG_INTEL_SCU_IPC=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING INTEL_SCU_IPC"
-          grep -q "CONFIG_INTEL_SCU_PCI=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING INTEL_SCU_PCI"
-          grep -q "CONFIG_INTEL_IOMMU=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING INTEL_IOMMU"
-          grep -q "CONFIG_MMC_SDHCI_ACPI=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING MMC_SDHCI_ACPI"
-          grep -q "CONFIG_MMC_BLOCK=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING MMC_BLOCK"
-          grep -q "CONFIG_EXT4_FS=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING EXT4_FS"
-          grep -q "CONFIG_PINCTRL_CHERRYVIEW=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING PINCTRL_CHERRYVIEW"
-          grep -q "CONFIG_PINCTRL_BAYTRAIL=y" .config || CRITICAL_MISSING="$CRITICAL_MISSING PINCTRL_BAYTRAIL"
-          
-          if [ -n "$CRITICAL_MISSING" ]; then
-            echo ""
-            echo "❌❌❌ FALLO CRÍTICO DE CONFIGURACIÓN ❌❌❌"
-            echo ""
-            echo "Las siguientes opciones críticas NO ESTÁN HABILITADAS en .config:"
-            for opt in $CRITICAL_MISSING; do
-              echo "  ❌ CONFIG_$opt"
-              grep "CONFIG_$opt" .config || echo "     (no aparece en .config)"
-            done
-            echo ""
-            echo "Sin estas opciones, el kernel NO PODRÁ BOOTEAR (kernel panic)."
-            echo ""
-            echo "Causa probable:"
-            echo "  - Faltan dependencias en el defconfig"
-            echo "  - El .config cacheado está corrupto"
-            echo ""
-            echo "SOLUCIÓN:"
-            echo "  1. Ve a Settings → Actions → Caches"
-            echo "  2. Elimina TODOS los cachés que empiecen con 'config-'"
-            echo "  3. Verifica que el defconfig tenga las dependencias necesarias"
-            echo "  4. Vuelve a correr el workflow"
-            echo ""
-            exit 1
-          fi
-          
-          echo "✅ Todas las opciones críticas verificadas y habilitadas!"
-          echo ""
-
-          START_TIME=$(date +%s)
-
-          echo "🔨 Compilando bzImage + módulos..."
-          make -j$JOBS \
-            KERNELRELEASE=${{ env.KERNEL_VERSION }} \
-            KCONFIG_NOTIMESTAMP=1 \
-            bzImage modules 2>&1 | tee build.log
-
-          END_TIME=$(date +%s)
-          BUILD_TIME=$((END_TIME - START_TIME))
-
-          echo ""
-          echo "=========================================="
-          echo "✅ COMPILACIÓN COMPLETADA"
-          echo "=========================================="
-          echo "Tiempo: $((BUILD_TIME / 60))m $((BUILD_TIME % 60))s"
-          echo "bzImage: $(ls -lh arch/x86/boot/bzImage)"
-          echo "=========================================="
-          echo "BUILD_TIME=$BUILD_TIME" >> $GITHUB_ENV
-
-      - name: Package .deb
-        if: env.PACKAGE_FORMAT == 'deb' || env.PACKAGE_FORMAT == 'ambos'
-        working-directory: kernel-src
-        run: |
-          export PATH="/usr/lib/ccache:$PATH"
-          export CCACHE_DIR="$HOME/.ccache"
-
-          if [ "${{ env.COMPILER }}" = "clang" ]; then
-           export CC="ccache clang"
-           export CXX="ccache clang++"
-           export HOSTCC="clang"
-           export HOSTCXX="clang++"
-           export LLVM=1
-           export LLVM_IAS=1
-
-           CLANG_FLAGS="-O2 -march=x86-64-v2 -mtune=generic -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128"
-           if ! grep -qE "CONFIG_FRAME_POINTER=y|CONFIG_FUNCTION_TRACER=y|CONFIG_STACK_TRACER=y" .config; then
-             CLANG_FLAGS="$CLANG_FLAGS -fomit-frame-pointer"
-           fi
-           export KCFLAGS="$CLANG_FLAGS"
-
-           if [ "${{ env.LINKER }}" = "lld" ]; then
-             export LDFLAGS="-fuse-ld=lld -Wl,--hash-style=gnu -Wl,--build-id=sha1"
-           fi
-          else
-           export CC="ccache gcc"
-           export CXX="ccache g++"
-
-           GCC_FLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16"
-           if ! grep -qE "CONFIG_FRAME_POINTER=y|CONFIG_FUNCTION_TRACER=y|CONFIG_STACK_TRACER=y" .config; then
-             GCC_FLAGS="$GCC_FLAGS -fomit-frame-pointer"
-           fi
-           export KCFLAGS="$GCC_FLAGS"
-
-           if [ "${{ env.LINKER }}" = "mold" ] && command -v mold &> /dev/null; then
-             export LDFLAGS="-fuse-ld=mold -Wl,--hash-style=gnu -Wl,--build-id=sha1"
-           fi
-          fi
-
-          export KCPPFLAGS="-D_FORTIFY_SOURCE=2"
-          export KDOC_WERROR=0
-          export LOCALVERSION=""
-          export DEBIAN_FRONTEND=noninteractive
-          export DEBCONF_NONINTERACTIVE_SEEN=true
-          export KCONFIG_ALLCONFIG=.config
-          export KCONFIG_NOTIMESTAMP=1
-          export KBUILD_BUILD_VERSION=1
-
-          JOBS=$(($(nproc) + 2))
-
-          echo "🔨 Empaquetando .deb (reutiliza objetos ya compilados)..."
-
-          yes "" 2>/dev/null | make -s -j$JOBS \
-            KERNELRELEASE=${{ env.KERNEL_VERSION }} \
-            KDEB_PKGVERSION=${{ env.KERNEL_VERSION }}-1 \
-            KDEB_SOURCENAME=linux-custom \
-            KDEB_COMPRESS=xz \
-            INSTALL_MOD_STRIP=1 \
-            CONFIG_SHELL=/bin/bash \
-            KCONFIG_NOTIMESTAMP=1 \
-            KCONFIG_ALLCONFIG=$(pwd)/.config \
-            bindeb-pkg 2>&1 | tee -a build.log || {
-              echo "⚠️  Build con 'yes' falló, reintentando sin pipe..."
-              make -s -j$JOBS \
-                KERNELRELEASE=${{ env.KERNEL_VERSION }} \
-                KDEB_PKGVERSION=${{ env.KERNEL_VERSION }}-1 \
-                KDEB_SOURCENAME=linux-custom \
-                KDEB_COMPRESS=xz \
-                INSTALL_MOD_STRIP=1 \
-                CONFIG_SHELL=/bin/bash \
-                KCONFIG_NOTIMESTAMP=1 \
-                KCONFIG_ALLCONFIG=$(pwd)/.config \
-                bindeb-pkg 2>&1 | tee -a build.log
-            }
-
-          echo ""
-          echo "✅ Paquetes .deb generados:"
-          ls -lh ../*.deb
-
-      - name: Show ccache statistics
-        if: always()
-        run: |
-          # BUILD_TIME solo se setea si corrió el step .deb; usar 0 como fallback
-          BUILD_TIME="${{ env.BUILD_TIME }}"
-          BUILD_TIME="${BUILD_TIME:-0}"
-
-          echo "=========================================="
-          echo "ESTADÍSTICAS FINALES DE CCACHE"
-          echo "=========================================="
-          ccache --show-stats
-          echo ""
-
-          STATS=$(ccache --show-stats)
-
-          CACHE_HITS=$(echo "$STATS" | grep -i "hits:" | grep -oE '[0-9]+' | head -1 || echo "0")
-          CACHE_MISS=$(echo "$STATS" | grep -i "misses:" | grep -oE '[0-9]+' | head -1 || echo "0")
-
-          if [ "$CACHE_HITS" = "0" ]; then
-            DIRECT=$(echo "$STATS" | grep -iE "(direct|cache hit \(direct\))" | grep -oE '[0-9]+' | head -1 || echo "0")
-            PREPROC=$(echo "$STATS" | grep -iE "(preprocessed|cache hit \(preprocessed\))" | grep -oE '[0-9]+' | head -1 || echo "0")
-            CACHE_HITS=$((DIRECT + PREPROC))
-          fi
-
-          if [ "$CACHE_MISS" = "0" ]; then
-            CACHE_MISS=$(echo "$STATS" | grep -iE "(cache miss|misses)" | grep -oE '[0-9]+' | head -1 || echo "0")
-          fi
-
-          TOTAL=$((CACHE_HITS + CACHE_MISS))
-
-          echo "📊 Estadísticas de compilación:"
-          echo "   Cache hits: $CACHE_HITS"
-          echo "   Cache misses: $CACHE_MISS"
-          echo "   Total compilaciones: $TOTAL"
-
-          if [ $TOTAL -gt 0 ]; then
-            HIT_RATE=$(awk "BEGIN {printf \"%.1f\", ($CACHE_HITS * 100) / $TOTAL}")
-            echo "   Tasa de cache hits: ${HIT_RATE}%"
-            echo ""
-
-            if (( $(echo "$HIT_RATE > 80" | bc -l) )); then
-              echo "🎉 EXCELENTE! El caché proporcionó una mejora masiva de velocidad!"
-              echo "   Build fue ~5x más rápida que una build limpia."
-            elif (( $(echo "$HIT_RATE > 50" | bc -l) )); then
-              echo "✅ BUEN rendimiento del caché."
-              echo "   Build fue ~3x más rápida que una build limpia."
-            elif (( $(echo "$HIT_RATE > 20" | bc -l) )); then
-              echo "⚠️  Uso MODERADO del caché."
-              echo "   Build fue ~2x más rápida que una build limpia."
-            else
-              echo "📝 USO BAJO del caché - fue casi una recompilación completa."
-              echo "   ¡La próxima build será mucho más rápida!"
-            fi
-          else
-            echo ""
-            echo "⚠️  Sin estadísticas de compilación disponibles."
-          fi
-
-          FINAL_SIZE=$(du -sh ~/.ccache 2>/dev/null | cut -f1 || echo "desconocido")
-          echo ""
-          echo "💾 Tamaño final del caché: $FINAL_SIZE"
-          echo ""
-          echo "=========================================="
-          echo "DEBUG: Análisis de duración de build"
-          echo "=========================================="
-          echo "⏱️  Tiempo total de build: ${BUILD_TIME} segundos ($((BUILD_TIME / 60)) min)"
-          echo ""
-          if [ "${BUILD_TIME}" -gt 7200 ]; then
-            echo "🚨 CRÍTICO: ¡La build tardó más de 2 horas!"
-            echo "   Una build normal debería tomar 45-55 minutos"
-            echo "   Posibles causas:"
-            echo "   1. ccache no funcionando (ver estadísticas arriba)"
-            echo "   2. Símbolos de debug habilitados"
-            echo "   3. LTO accidentalmente habilitado"
-            echo "   4. Compilación de un solo hilo"
-            echo ""
-            echo "🔍 Verificando configuración..."
-            cd kernel-src
-            echo "   Config LTO:"
-            grep "CONFIG_LTO" .config || echo "   Sin config LTO encontrado"
-            echo ""
-            echo "   Config Debug:"
-            grep "CONFIG_DEBUG_INFO" .config || echo "   Sin CONFIG_DEBUG_INFO encontrado"
-          fi
-          echo "=========================================="
-
-      - name: Save ccache
-        uses: actions/cache/save@v5
-        if: always()
-        with:
-          path: ~/.ccache
-          key: ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ github.run_id }}
-
-      - name: Save kernel build tools
-        uses: actions/cache/save@v5
-        if: always() && steps.kernel-tools-restore.outputs.cache-hit != 'true'
-        with:
-          path: |
-            kernel-src/scripts/basic/
-            kernel-src/scripts/kconfig/
-            kernel-src/scripts/mod/
-            kernel-src/tools/objtool/
-          key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
-
-      - name: Save generated .config
-        uses: actions/cache/save@v5
-        if: always() && steps.config-restore.outputs.cache-hit != 'true'
-        with:
-          path: kernel-src/.config
-          key: config-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig') }}-v2
-
-      - name: Save build metrics
-        if: always()
-        run: |
-          BUILD_TIME="${{ env.BUILD_TIME }}"
-          BUILD_TIME="${BUILD_TIME:-0}"
-          {
-            echo "=========================================="
-            echo "MÉTRICAS DE BUILD"
-            echo "=========================================="
-            echo "Fecha: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
-            echo "Versión del kernel: ${{ env.KERNEL_VERSION }}"
-            echo "Build número: #${{ github.run_number }}"
-            echo "Branch: ${{ github.ref_name }}"
-            echo "Commit: ${{ github.sha }}"
-            echo "Toolchain: ${{ env.COMPILER }} + ${{ env.LINKER }}"
-            echo "Formato de paquete: ${{ env.PACKAGE_FORMAT }}"
-            echo "Tiempo de build: ${BUILD_TIME} segundos ($((BUILD_TIME / 60))m $((BUILD_TIME % 60))s)"
-            echo ""
-            echo "=== Información del caché ==="
-            echo "ccache restaurado desde: ${{ steps.ccache-restore.outputs.cache-matched-key }}"
-            echo "tools restaurado desde: ${{ steps.kernel-tools-restore.outputs.cache-matched-key }}"
-            echo ""
-            echo "=== Estadísticas de Ccache ==="
-            ccache --show-stats 2>/dev/null || echo "stats de ccache no disponibles"
-            echo "=========================================="
-          } > build-metrics.txt
-
-      # ── NUEVO: Empaquetar para Arch Linux ──────────────────────────────────
-      # Reutiliza los binarios ya compilados en el step anterior (bzImage + módulos
-      # que quedaron en el tmpfs /tmp/kernel-build), evitando recompilar el kernel.
-      # makepkg corre dentro de un contenedor Docker archlinux:latest para tener
-      # el entorno correcto sin contaminar el runner Ubuntu.
-
-      - name: Build Arch package (via Docker)
-        if: env.PACKAGE_FORMAT == 'arch' || env.PACKAGE_FORMAT == 'ambos'
-        run: |
-          echo "=========================================="
-          echo "BUILD PAQUETE ARCH LINUX"
-          echo "=========================================="
-
-          STAGING="$GITHUB_WORKSPACE/arch-staging"
-          PKGOUT="$GITHUB_WORKSPACE/arch-packages"
-          mkdir -p "$STAGING/boot"
-          mkdir -p "$PKGOUT"
-
-          # ── Recopilar binarios desde el tmpfs ──────────────────────────────
-          echo "📦 Recopilando binarios del kernel desde tmpfs..."
-
-          cp /tmp/kernel-build/arch/x86/boot/bzImage \
-            "$STAGING/boot/vmlinuz-${{ env.KERNEL_VERSION }}"
-          cp /tmp/kernel-build/System.map \
-            "$STAGING/boot/System.map-${{ env.KERNEL_VERSION }}"
-          cp /tmp/kernel-build/.config \
-            "$STAGING/boot/config-${{ env.KERNEL_VERSION }}"
-
-          # Instalar módulos en el staging con las herramientas ya presentes en el runner
-          echo "📦 Instalando módulos en staging (con INSTALL_MOD_STRIP=1)..."
-          # INSTALL_MOD_PATH apunta a $STAGING/usr para que los módulos
-          # queden en usr/lib/modules/ — Arch usa /usr/lib, no /lib
-          make -C /tmp/kernel-build \
-            modules_install \
-            INSTALL_MOD_PATH="$STAGING/usr" \
-            INSTALL_MOD_STRIP=1 \
-            KERNELRELEASE=${{ env.KERNEL_VERSION }} \
-            -s
-
-          # Eliminar symlinks que apuntarían a paths del runner (no válidos dentro del paquete)
-          rm -f "$STAGING/usr/lib/modules/${{ env.KERNEL_VERSION }}/build"
-          rm -f "$STAGING/usr/lib/modules/${{ env.KERNEL_VERSION }}/source"
-
-          echo "✅ Staging listo:"
-          echo "   Boot: $(ls $STAGING/boot/)"
-          echo "   Módulos .ko: $(find $STAGING/usr/lib/modules -name '*.ko*' 2>/dev/null | wc -l) archivos"
-          echo "   Tamaño total: $(du -sh $STAGING | cut -f1)"
-          echo ""
-
-          # ── Determinar descripción según toolchain ─────────────────────────
-          if [ "${{ env.COMPILER }}" = "clang" ]; then
-            PKGDESC="Kernel Linux ${{ env.KERNEL_VERSION }} para Acer SW1-011 (Clang+LLD, x86-64-v2)"
-          else
-            PKGDESC="Kernel Linux ${{ env.KERNEL_VERSION }} para Acer SW1-011 (GCC+${{ env.LINKER }}, Silvermont)"
-          fi
-
-          # ── Escribir preset y hook en el staging ANTES de que makepkg corra ──
-          # Usar printf evita problemas de heredoc indentado en YAML y de
-          # /dev/stdin no disponible en el entorno fakeroot de makepkg.
-          KV="${{ env.KERNEL_VERSION }}"
-          
-          # Arch Linux no permite guiones en pkgver
-          # Convertir "7.0.0-rc1" → "7.0.0rc1" para pkgver
-          # Pero mantener la versión completa para archivos del kernel
-          PKGVER="${KV//-/}"  # Elimina TODOS los guiones
-
-          mkdir -p "$STAGING/etc/mkinitcpio.d"
-          printf 'ALL_config="/etc/mkinitcpio.conf"\n' > "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          printf 'ALL_kver="%s"\n' "$KV"    >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          printf "PRESETS=('default' 'fallback')\n"        >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          printf 'default_image="/boot/initramfs-%s.img"\n' "$KV"       >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          printf 'fallback_options="-S autodetect"\n'       >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          printf 'fallback_image="/boot/initramfs-%s-fallback.img"\n' "$KV" >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-
-          mkdir -p "$STAGING/usr/share/libalpm/hooks"
-
-          # Hook 60: depmod (corre PRIMERO para regenerar dependencias de módulos)
-          printf '[Trigger]\nOperation = Install\nOperation = Upgrade\nOperation = Remove\nType = Path\nTarget = usr/lib/modules/%s/*\n' "$KV" \
-            > "$STAGING/usr/share/libalpm/hooks/60-linux-acer-sw1-011-depmod.hook"
-          printf '\n[Action]\nDescription = Actualizando dependencias de módulos para %s...\nWhen = PostTransaction\nExec = /usr/bin/depmod %s\n' "$KV" "$KV" \
-            >> "$STAGING/usr/share/libalpm/hooks/60-linux-acer-sw1-011-depmod.hook"
-
-          # Hook 95: mkinitcpio (corre DESPUÉS, cuando depmod ya terminó)
-          printf '[Trigger]\nOperation = Install\nOperation = Upgrade\nType = Package\nTarget = linux-acer-sw1-011\n' \
-            > "$STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
-          printf '\n[Action]\nDescription = Generando initramfs para linux-acer-sw1-011...\nWhen = PostTransaction\nExec = /usr/bin/mkinitcpio -p linux-acer-sw1-011\n' \
-            >> "$STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
-
-          echo "✅ Preset:"
-          cat "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          echo ""
-          echo "✅ Hook depmod (60):"
-          cat "$STAGING/usr/share/libalpm/hooks/60-linux-acer-sw1-011-depmod.hook"
-          echo ""
-          echo "✅ Hook mkinitcpio (95):"
-          cat "$STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
-          echo ""
-
-          # ── Generar PKGBUILD con printf ────────────────────────────────────
-          {
-            printf '# Maintainer: CypherNoodle <github.com/CypherNoodle>\n'
-            printf '# Generado por GitHub Actions - Build #${{ github.run_number }}\n'
-            printf '# Toolchain: ${{ env.COMPILER }} + ${{ env.LINKER }}\n\n'
-            printf 'pkgname=linux-acer-sw1-011\n'
-            printf 'pkgver=%s\n' "$PKGVER"
-            printf 'pkgrel=1\n'
-            printf 'pkgdesc="%s"\n' "$PKGDESC"
-            printf "arch=('x86_64')\n"
-            printf 'url="https://github.com/CypherNoodle/linux-Sw1-011"\n'
-            printf "license=('GPL2')\n"
-            printf "depends=('coreutils' 'kmod' 'mkinitcpio>=0.7')\n"
-            printf 'optdepends=(\n'
-            printf "    'linux-firmware: firmware para hardware periférico'\n"
-            printf ')\n'
-            printf 'provides=("linux=%s")\n' "$PKGVER"
-            printf "options=('!strip')\n\n"
-            printf 'package() {\n'
-            printf '    # staging ya incluye preset y hook, solo copiar\n'
-            printf '    cp -a /staging/. "${pkgdir}/"\n'
-            printf '    chmod 644 "${pkgdir}/boot/vmlinuz-%s"\n' "$KV"
-            printf '}\n'
-          } > "$PKGOUT/PKGBUILD"
-
-          echo "=== PKGBUILD generado ==="
-          cat "$PKGOUT/PKGBUILD"
-          echo ""
-
-          # ── Ejecutar makepkg dentro de un contenedor Arch Linux ────────────
-          echo "🐳 Ejecutando makepkg en contenedor archlinux:latest..."
-
-          docker run --rm \
-            -v "$STAGING:/staging:ro" \
-            -v "$PKGOUT:/pkgout" \
-            archlinux:latest \
-            bash -c '
-              set -e
-
-              pacman-key --init
-              pacman-key --populate archlinux
-              pacman -Syu --noconfirm
-              pacman -S --noconfirm --needed base-devel
-
-              # makepkg no puede correr como root; se crea un usuario temporal
-              useradd -m builder
-              chown -R builder:builder /pkgout
-
-              cd /pkgout
-              su builder -c "makepkg \
-                --noconfirm \
-                --nodeps \
-                --nocheck \
-                --noprogressbar \
-                -f"
-            '
-
-          echo ""
-          echo "✅ Paquete Arch generado:"
-          ls -lh "$PKGOUT/"*.pkg.tar.* 2>/dev/null || {
-            echo "❌ ERROR: No se encontró el paquete .pkg.tar.*"
-            ls -la "$PKGOUT/"
-            exit 1
-          }
-
-      # ── Fin bloque Arch ────────────────────────────────────────────────────
-
-      - name: Generate CHANGELOG
-        run: |
-          BUILD_TIME="${{ env.BUILD_TIME }}"
-          BUILD_TIME="${BUILD_TIME:-0}"
-
-          echo "=========================================="
-          echo "GENERANDO CHANGELOG"
-          echo "=========================================="
-          echo "Directorio actual: $(pwd)"
-          echo "Workspace: $GITHUB_WORKSPACE"
-          echo ""
-
-          echo "📂 Estructura de directorios:"
-          ls -la "$GITHUB_WORKSPACE/" | head -20
-          echo ""
-
-          # Bloque de instalación según el formato elegido
-          generate_install_section() {
-            FORMAT="${{ env.PACKAGE_FORMAT }}"
-            if [ "$FORMAT" = "deb" ] || [ "$FORMAT" = "ambos" ]; then
-              echo "### Debian / Ubuntu"
-              echo ""
-              echo "\`\`\`bash"
-              echo "sudo dpkg -i linux-image-*.deb linux-headers-*.deb"
-              echo "sudo reboot"
-              echo "\`\`\`"
-              echo ""
-            fi
-            if [ "$FORMAT" = "arch" ] || [ "$FORMAT" = "ambos" ]; then
-              echo "### Arch Linux"
-              echo ""
-              echo "\`\`\`bash"
-              echo "sudo pacman -U linux-acer-sw1-011-*.pkg.tar.zst"
-              echo "# El hook post-instalación regenera el initramfs automáticamente"
-              echo "sudo reboot"
-              echo "\`\`\`"
-              echo ""
-            fi
-          }
-
-          # Bloque de contenido de paquetes según el formato elegido
-          generate_packages_section() {
-            FORMAT="${{ env.PACKAGE_FORMAT }}"
-            if [ "$FORMAT" = "deb" ] || [ "$FORMAT" = "ambos" ]; then
-              echo "### Debian / Ubuntu"
-              echo "- \`linux-image-*\` — Imagen del kernel"
-              echo "- \`linux-headers-*\` — Headers para compilar módulos"
-              echo "- \`linux-libc-dev-*\` — Headers para espacio de usuario"
-              echo ""
-            fi
-            if [ "$FORMAT" = "arch" ] || [ "$FORMAT" = "ambos" ]; then
-              echo "### Arch Linux"
-              echo "- \`linux-acer-sw1-011-*.pkg.tar.zst\` — Imagen + módulos"
-              echo ""
-            fi
-          }
-
-          if [ -d "$GITHUB_WORKSPACE/kernel-git-backup" ]; then
-            echo "✅ kernel-git-backup encontrado en: $GITHUB_WORKSPACE/kernel-git-backup"
-            echo "   Tamaño: $(du -sh "$GITHUB_WORKSPACE/kernel-git-backup" 2>/dev/null | cut -f1)"
-
-            echo ""
-            echo "📦 Creando directorio git temporal..."
-            TEMP_GIT_DIR="$GITHUB_WORKSPACE/temp-git-for-changelog"
-            mkdir -p "$TEMP_GIT_DIR"
-
-            cp -r "$GITHUB_WORKSPACE/kernel-git-backup" "$TEMP_GIT_DIR/.git"
-
-            cd "$TEMP_GIT_DIR"
-            echo "Trabajando desde: $(pwd)"
-
-            echo ""
-            echo "📝 Generando CHANGELOG con historial git..."
-            {
-              echo "# Linux Kernel ${{ env.KERNEL_VERSION }} - Build Release"
-              echo ""
-              echo "## Información de compilación"
-              echo ""
-              echo "- **Versión del kernel:** ${{ env.KERNEL_VERSION }}"
-              echo "- **Fecha de compilación:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
-              echo "- **Tiempo de compilación:** $((BUILD_TIME / 60)) minutos $((BUILD_TIME % 60)) segundos"
-              echo "- **Toolchain:** ${{ env.COMPILER }} + ${{ env.LINKER }}"
-              if [ "${{ env.COMPILER }}" = "gcc" ]; then
-                echo "- **Plataforma objetivo:** Intel x5-Z8300 (Silvermont)"
-                echo "- **Flags del compilador:** -march=silvermont -mtune=silvermont"
-              else
-                echo "- **Plataforma objetivo:** x86-64-v2 (genérico)"
-                echo "- **Flags del compilador:** -march=x86-64-v2 -mtune=generic"
-              fi
-              echo ""
-              echo "## Instalación"
-              echo ""
-              generate_install_section
-              echo "## Contenido de los paquetes"
-              echo ""
-              generate_packages_section
-              echo "## Últimos 30 cambios del kernel"
-              echo ""
-              git log --reverse -n 30 --pretty=format:"- \`%h\` %s (%an, %ar)" 2>/dev/null || echo "- Sin historial git disponible"
-              echo ""
-              echo ""
-              echo "## Verificación de integridad"
-              echo ""
-              echo "Todos los paquetes tienen checksums en \`SHA256SUMS.txt\`. Verificar con:"
-              echo ""
-              echo "\`\`\`bash"
-              echo "sha256sum -c SHA256SUMS.txt"
-              echo "\`\`\`"
-            } > "$GITHUB_WORKSPACE/CHANGELOG.md"
-
-            cd "$GITHUB_WORKSPACE"
-            rm -rf "$TEMP_GIT_DIR"
-            echo "✅ Directorio git temporal limpiado"
-
-          else
-            echo "⚠️  kernel-git-backup no encontrado, generando CHANGELOG sin historial git..."
-
-            {
-              echo "# Linux Kernel ${{ env.KERNEL_VERSION }} - Build Release"
-              echo ""
-              echo "## Información de compilación"
-              echo ""
-              echo "- **Versión del kernel:** ${{ env.KERNEL_VERSION }}"
-              echo "- **Fecha de compilación:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
-              echo "- **Tiempo de compilación:** $((BUILD_TIME / 60)) minutos $((BUILD_TIME % 60)) segundos"
-              echo "- **Toolchain:** ${{ env.COMPILER }} + ${{ env.LINKER }}"
-              if [ "${{ env.COMPILER }}" = "gcc" ]; then
-                echo "- **Plataforma objetivo:** Intel x5-Z8300 (Silvermont)"
-                echo "- **Flags del compilador:** -march=silvermont -mtune=silvermont"
-              else
-                echo "- **Plataforma objetivo:** x86-64-v2 (genérico)"
-                echo "- **Flags del compilador:** -march=x86-64-v2 -mtune=generic"
-              fi
-              echo ""
-              echo "## Instalación"
-              echo ""
-              generate_install_section
-              echo "## Verificación de integridad"
-              echo ""
-              echo "\`\`\`bash"
-              echo "sha256sum -c SHA256SUMS.txt"
-              echo "\`\`\`"
-            } > "$GITHUB_WORKSPACE/CHANGELOG.md"
-          fi
-
-          echo ""
-          echo "=========================================="
-          echo "VERIFICANDO CHANGELOG"
-          echo "=========================================="
-
-          if [ -f "$GITHUB_WORKSPACE/CHANGELOG.md" ]; then
-            echo "✅ CHANGELOG.md generado exitosamente!"
-            echo "   Ubicación: $GITHUB_WORKSPACE/CHANGELOG.md"
-            echo "   Líneas: $(wc -l < "$GITHUB_WORKSPACE/CHANGELOG.md")"
-            echo "   Tamaño: $(du -h "$GITHUB_WORKSPACE/CHANGELOG.md" | cut -f1)"
-            echo ""
-            echo "Primeras 10 líneas:"
-            head -10 "$GITHUB_WORKSPACE/CHANGELOG.md"
-            echo "=========================================="
-          else
-            echo "❌ ERROR: CHANGELOG.md no encontrado!"
-            echo "   Ubicación esperada: $GITHUB_WORKSPACE/CHANGELOG.md"
-            echo ""
-            find "$GITHUB_WORKSPACE" -name "CHANGELOG.md" -type f 2>/dev/null || echo "CHANGELOG.md no encontrado en ningún lugar"
-            echo ""
-            echo "Contenido del workspace raíz:"
-            ls -la "$GITHUB_WORKSPACE/"
-            exit 1
-          fi
-
-      - name: Collect release files
-        run: |
-          mkdir -p release
-
-          echo "🔍 Recopilando archivos del release..."
-          echo "Directorio de trabajo: $(pwd)"
-
-          # Paquetes .deb (generados en /tmp/ por el tmpfs)
-          if ls /tmp/*.deb 1> /dev/null 2>&1; then
-            cp /tmp/*.deb release/
-            DEB_COUNT=$(ls release/*.deb 2>/dev/null | wc -l)
-            echo "✅ Copiados $DEB_COUNT paquete(s) .deb"
-          else
-            if [ "${{ env.PACKAGE_FORMAT }}" = "deb" ] || [ "${{ env.PACKAGE_FORMAT }}" = "ambos" ]; then
-              echo "❌ ERROR: No se encontraron archivos .deb en /tmp/"
-              exit 1
-            else
-              echo "ℹ️  Sin paquetes .deb (formato seleccionado: ${{ env.PACKAGE_FORMAT }})"
-            fi
-          fi
-
-          # Paquetes Arch (generados en arch-packages/ dentro del workspace)
-          if ls arch-packages/*.pkg.tar.* 1> /dev/null 2>&1; then
-            cp arch-packages/*.pkg.tar.* release/
-            ARCH_COUNT=$(ls release/*.pkg.tar.* 2>/dev/null | wc -l)
-            echo "✅ Copiados $ARCH_COUNT paquete(s) Arch"
-          else
-            if [ "${{ env.PACKAGE_FORMAT }}" = "arch" ] || [ "${{ env.PACKAGE_FORMAT }}" = "ambos" ]; then
-              echo "❌ ERROR: No se encontraron paquetes Arch en arch-packages/"
-              exit 1
-            else
-              echo "ℹ️  Sin paquetes Arch (formato seleccionado: ${{ env.PACKAGE_FORMAT }})"
-            fi
-          fi
-
-          # CHANGELOG.md
-          if [ -f "$GITHUB_WORKSPACE/CHANGELOG.md" ]; then
-            cp "$GITHUB_WORKSPACE/CHANGELOG.md" release/
-            echo "✅ Copiado CHANGELOG.md"
-          else
-            echo "❌ ERROR: CHANGELOG.md no encontrado en el workspace"
-            find "$GITHUB_WORKSPACE" -name "CHANGELOG.md" -type f 2>/dev/null || echo "CHANGELOG.md no encontrado en ningún lugar"
-            exit 1
-          fi
-
-          # build-metrics.txt
-          if [ -f "$GITHUB_WORKSPACE/build-metrics.txt" ]; then
-            cp "$GITHUB_WORKSPACE/build-metrics.txt" release/
-            echo "✅ Copiado build-metrics.txt"
-          else
-            echo "⚠️  Advertencia: build-metrics.txt no encontrado, omitiendo"
-          fi
-
-          # Generar checksums separados por formato
-          cd release
-
-          if ls *.deb 1> /dev/null 2>&1; then
-            sha256sum *.deb > SHA256SUMS-deb.txt
-            echo "✅ SHA256SUMS-deb.txt generado"
-          fi
-
-          if ls *.pkg.tar.* 1> /dev/null 2>&1; then
-            sha256sum *.pkg.tar.* > SHA256SUMS-arch.txt
-            echo "✅ SHA256SUMS-arch.txt generado"
-          fi
-
-          # Checksum combinado
-          sha256sum * 2>/dev/null | grep -v "SHA256SUMS" > SHA256SUMS.txt || true
-
-          echo ""
-          echo "=========================================="
-          echo "ARCHIVOS DEL RELEASE PREPARADOS"
-          echo "=========================================="
-          ls -lh
-          echo ""
-          echo "📋 Checksums Debian:"
-          cat SHA256SUMS-deb.txt 2>/dev/null || echo "Sin paquetes .deb"
-          echo ""
-          echo "📋 Checksums Arch:"
-          cat SHA256SUMS-arch.txt 2>/dev/null || echo "Sin paquetes Arch"
-          echo "=========================================="
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: kernel-${{ env.KERNEL_VERSION }}-build-${{ github.run_number }}
-          path: |
-            release/*.deb
-            release/*.pkg.tar.*
-            release/*.txt
-            release/*.md
-            kernel-src/build.log
-
-      - name: Create or Update GitHub Release
-        run: |
-          echo "=========================================="
-          echo "CREANDO RELEASE"
-          echo "=========================================="
-          echo "Tag: ${{ env.RELEASE_TAG }}"
-
-          PRERELEASE_FLAG=""
-          if [ "${{ github.event.inputs.prerelease }}" = "true" ]; then
-            PRERELEASE_FLAG="--prerelease"
-            echo "Tipo: Pre-release"
-            RELEASE_TITLE="Linux Kernel ${{ env.KERNEL_VERSION }} (Pre-release)"
-          else
-            PRERELEASE_FLAG="--latest"
-            echo "Tipo: Release estable"
-            RELEASE_TITLE="Linux Kernel ${{ env.KERNEL_VERSION }}"
-          fi
-          echo ""
-
-          # Construir lista de archivos dinámicamente para evitar error con globs vacíos
-          RELEASE_FILES=()
-          for f in release/*.deb \
-                   release/*.pkg.tar.* \
-                   release/SHA256SUMS*.txt \
-                   release/build-metrics.txt; do
-            [ -f "$f" ] && RELEASE_FILES+=("$f")
-          done
-
-          echo "Archivos a subir (${#RELEASE_FILES[@]}):"
-          printf '   %s\n' "${RELEASE_FILES[@]}"
-          echo ""
-
-          if [ "${{ steps.check_release.outputs.exists }}" = "true" ] && [ "${{ github.event.inputs.prerelease }}" = "true" ]; then
-            PRERELEASE_TAG="${{ env.RELEASE_TAG }}-pre-${{ github.run_number }}"
-            echo "⚠️  Release estable existe, creando pre-release con tag: $PRERELEASE_TAG"
-
-            gh release create "$PRERELEASE_TAG" \
-              "${RELEASE_FILES[@]}" \
-              --title "$RELEASE_TITLE (Build #${{ github.run_number }})" \
-              --notes-file release/CHANGELOG.md \
-              $PRERELEASE_FLAG
-          else
-            gh release create "${{ env.RELEASE_TAG }}" \
-              "${RELEASE_FILES[@]}" \
-              --title "$RELEASE_TITLE" \
-              --notes-file release/CHANGELOG.md \
-              $PRERELEASE_FLAG
-          fi
-
-          echo ""
-          echo "✅ ¡Release creado exitosamente!"
-          echo "=========================================="
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-
-      - name: Build summary
-        if: always()
-        run: |
-          BUILD_TIME="${{ env.BUILD_TIME }}"
-          BUILD_TIME="${BUILD_TIME:-0}"
-
-          echo "=========================================="
-          echo "🎉 WORKFLOW COMPLETADO"
-          echo "=========================================="
-          echo "Versión del kernel: ${{ env.KERNEL_VERSION }}"
-          echo "Release Tag: ${{ env.RELEASE_TAG }}"
-          echo "Toolchain: ${{ env.COMPILER }} + ${{ env.LINKER }}"
-          echo "Formato de paquete: ${{ env.PACKAGE_FORMAT }}"
-          echo "Tiempo de build: $((BUILD_TIME / 60))m $((BUILD_TIME % 60))s"
-          echo ""
-          echo "📦 Paquetes .deb:  $(ls release/*.deb 2>/dev/null | wc -l)"
-          echo "📦 Paquetes Arch:  $(ls release/*.pkg.tar.* 2>/dev/null | wc -l)"
-          echo ""
-          echo "📦 URL del release:"
-          echo "https://github.com/${{ github.repository }}/releases/tag/${{ env.RELEASE_TAG }}"
-          echo "=========================================="
+          if [ "${{ env.LINKER }}" = "mold" ]; then export LDFLAGS="-fuse-ld=mold"; fi
+          if [ "${{ env.LINKER }}" = "lld" ]; then
