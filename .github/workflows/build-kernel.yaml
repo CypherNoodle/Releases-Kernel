@@ -53,14 +53,29 @@ jobs:
 
       - name: Setup tmpfs build directory
         run: |
-          echo "🚀 Configurando tmpfs..."
+          echo "🚀 Configurando tmpfs para I/O más rápido..."
+          TOTAL_RAM=$(free -g | grep Mem | awk '{print $2}')
+          AVAILABLE_RAM=$(free -g | grep Mem | awk '{print $7}')
+          echo "RAM total: ${TOTAL_RAM}GB"
+          echo "RAM disponible: ${AVAILABLE_RAM}GB"
+          SOURCE_SIZE=$(du -sh --exclude=.git kernel-src | cut -f1)
+          GIT_SIZE=$(du -sh kernel-src/.git 2>/dev/null | cut -f1)
+          echo "Tamaño fuente (sin .git): $SOURCE_SIZE"
+          echo "Tamaño historial git: $GIT_SIZE"
+          TMPFS_SIZE="6G"
           sudo mkdir -p /tmp/kernel-build
-          sudo mount -t tmpfs -o size=6G tmpfs /tmp/kernel-build
+          sudo mount -t tmpfs -o size=$TMPFS_SIZE tmpfs /tmp/kernel-build
           sudo chown -R $USER:$USER /tmp/kernel-build
+          echo "✅ tmpfs montado en /tmp/kernel-build (${TMPFS_SIZE})"
+          df -h /tmp/kernel-build
+          echo ""
+          echo "📦 Moviendo fuentes del kernel al tmpfs (conservando .git en disco)..."
           rsync -a --exclude='.git' kernel-src/ /tmp/kernel-build/
           mv kernel-src/.git kernel-git-backup
           rm -rf kernel-src
           ln -s /tmp/kernel-build kernel-src
+          echo "✅ Fuentes del kernel en RAM (tmpfs)"
+          echo "✅ Historial git preservado en disco para el changelog"
 
       - name: Detect Kernel Version
         id: detect_version
@@ -68,10 +83,14 @@ jobs:
         run: |
           KERNEL_VERSION=$(awk '/^VERSION = / {v=$3} /^PATCHLEVEL = / {p=$3} /^SUBLEVEL = / {s=$3} /^EXTRAVERSION = / {e=$3} END {print v "." p "." s e}' Makefile)
           echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
-          echo "KERNEL_MAJOR_MINOR=$(echo $KERNEL_VERSION | cut -d. -f1-2)" >> $GITHUB_ENV
-          echo "RELEASE_TAG=v${KERNEL_VERSION}" >> $GITHUB_ENV
+          echo "version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
+          KERNEL_MAJOR_MINOR=$(awk '/^VERSION = / {v=$3} /^PATCHLEVEL = / {p=$3} END {print v "." p}' Makefile)
+          echo "KERNEL_MAJOR_MINOR=$KERNEL_MAJOR_MINOR" >> $GITHUB_ENV
+          RELEASE_TAG="v${KERNEL_VERSION}"
+          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
 
-      - name: Determine variables
+      - name: Determine toolchain variables
+        id: toolchain
         run: |
           TOOLCHAIN="${{ github.event.inputs.toolchain || 'gcc-mold' }}"
           case "$TOOLCHAIN" in
@@ -82,54 +101,126 @@ jobs:
           echo "CONFIG_SOURCE=${{ github.event.inputs.config_source || 'sw1-011' }}" >> $GITHUB_ENV
           echo "PACKAGE_FORMAT=${{ github.event.inputs.package_format || 'deb' }}" >> $GITHUB_ENV
 
-      - name: Install dependencies
+      - name: Check if release exists
+        id: check_release
         run: |
+          if gh release view "${{ env.RELEASE_TAG }}" --repo ${{ github.repository }} > /dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            if [ "${{ github.event.inputs.prerelease }}" = "true" ]; then echo "action=skip" >> $GITHUB_OUTPUT; else echo "action=delete" >> $GITHUB_OUTPUT; fi
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "action=create" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Delete old release assets
+        if: steps.check_release.outputs.action == 'delete'
+        run: |
+          gh release delete "${{ env.RELEASE_TAG }}" --repo ${{ github.repository }} --yes --cleanup-tag 2>/dev/null || true
+          git push --delete origin "${{ env.RELEASE_TAG }}" 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Restore APT cache
+        uses: actions/cache/restore@v5
+        id: apt-restore
+        with:
+          path: ~/apt-cache
+          key: apt-${{ runner.os }}-v4
+          restore-keys: |
+            apt-${{ runner.os }}-
+
+      - name: Install build dependencies
+        run: |
+          if [ -d ~/apt-cache ]; then sudo cp -r ~/apt-cache/* /var/cache/apt/archives/ 2>/dev/null || true; fi
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential bc libssl-dev libelf-dev libncurses-dev debhelper kmod cpio ccache libdw-dev zstd pigz lz4
           if [ "${{ env.COMPILER }}" = "clang" ]; then sudo apt-get install -y -qq clang llvm lld; fi
           if [ "${{ env.LINKER }}" = "mold" ]; then sudo apt-get install -y -qq mold || true; fi
+          mkdir -p ~/apt-cache
+          sudo cp -r /var/cache/apt/archives/*.deb ~/apt-cache/ 2>/dev/null || true
+
+      - name: Save APT cache
+        uses: actions/cache/save@v5
+        if: always() && steps.apt-restore.outputs.cache-hit != 'true'
+        with:
+          path: ~/apt-cache
+          key: apt-${{ runner.os }}-v4
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v5
+        id: ccache-restore
+        with:
+          path: ~/.ccache
+          key: ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-
+
+      - name: Restore generated .config
+        uses: actions/cache/restore@v5
+        id: config-restore
+        with:
+          path: kernel-src/.config
+          # La clave ahora incluye CONFIG_SOURCE para no mezclar sw1-011 con .config manual
+          key: config-${{ env.COMPILER }}-${{ env.CONFIG_SOURCE }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig', 'kernel-src/.config.x86_64') }}-v3
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size=5G
+          ccache --set-config=compression=true
+          ccache --set-config=temporary_dir=/tmp/kernel-build/ccache-tmp
+          mkdir -p /tmp/kernel-build/ccache-tmp
+          ccache --zero-stats
 
       - name: Prepare kernel configuration
         working-directory: kernel-src
         run: |
-          if [ "${{ env.CONFIG_SOURCE }}" == ".config" ]; then
-            cp .config.x86_64 .config
+          echo "🔧 Configurando kernel para ${{ env.COMPILER }} usando ${{ env.CONFIG_SOURCE }}..."
+          if [ -f .config ] && [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
+            echo "✅ Usando .config cacheado"
+            make -s olddefconfig > /dev/null 2>&1
           else
-            make -s acer_sw1_011_defconfig
+            if [ "${{ env.CONFIG_SOURCE }}" == ".config" ]; then
+              if [ -f ".config.x86_64" ]; then
+                cp .config.x86_64 .config
+              else
+                echo "❌ ERROR: .config.x86_64 no encontrado!"
+                exit 1
+              fi
+            else
+              make -s acer_sw1_011_defconfig
+            fi
+            scripts/config --disable CONFIG_DEBUG_INFO
+            scripts/config --set-val CONFIG_DEBUG_INFO_NONE y
+            make -s olddefconfig > /dev/null 2>&1
           fi
-          
-          scripts/config --disable CONFIG_DEBUG_INFO
-          scripts/config --set-val CONFIG_DEBUG_INFO_NONE y
-          make -s olddefconfig
 
           echo "🔍 Verificando opciones CRÍTICAS..."
           CRITICAL_MISSING=""
           for opt in CONFIG_INTEL_INT0002_VGPIO CONFIG_INTEL_SCU CONFIG_MMC_SDHCI_ACPI CONFIG_EXT4_FS CONFIG_PINCTRL_CHERRYVIEW; do
             grep -qE "^$opt=[ym]" .config || CRITICAL_MISSING="$CRITICAL_MISSING $opt"
           done
-          
-          if [ -n "$CRITICAL_MISSING" ]; then
-            echo "❌ ERROR: Faltan opciones: $CRITICAL_MISSING"
-            exit 1
-          fi
+          if [ -n "$CRITICAL_MISSING" ]; then exit 1; fi
 
       - name: Compile kernel
         working-directory: kernel-src
         run: |
           export PATH="/usr/lib/ccache:$PATH"
+          export CCACHE_DIR="$HOME/.ccache"
           if [ "${{ env.COMPILER }}" = "clang" ]; then export CC="ccache clang" LLVM=1; else export CC="ccache gcc"; fi
           if [ "${{ env.LINKER }}" = "mold" ]; then export LDFLAGS="-fuse-ld=mold"; fi
           START_TIME=$(date +%s)
-          make -j$(nproc) KERNELRELEASE=${{ env.KERNEL_VERSION }} bzImage modules
+          make -j$(($(nproc) + 2)) KERNELRELEASE=${{ env.KERNEL_VERSION }} bzImage modules
           echo "BUILD_TIME=$(($(date +%s) - START_TIME))" >> $GITHUB_ENV
 
       - name: Package .deb
-        if: contains(env.PACKAGE_FORMAT, 'deb') || env.PACKAGE_FORMAT == 'ambos'
+        if: env.PACKAGE_FORMAT == 'deb' || env.PACKAGE_FORMAT == 'ambos'
         working-directory: kernel-src
-        run: make -j$(nproc) KERNELRELEASE=${{ env.KERNEL_VERSION }} KDEB_PKGVERSION=${{ env.KERNEL_VERSION }}-1 bindeb-pkg
+        run: make -j$(($(nproc) + 2)) KERNELRELEASE=${{ env.KERNEL_VERSION }} KDEB_PKGVERSION=${{ env.KERNEL_VERSION }}-1 KDEB_COMPRESS=xz bindeb-pkg
 
-      - name: Build Arch package
-        if: contains(env.PACKAGE_FORMAT, 'arch') || env.PACKAGE_FORMAT == 'ambos'
+      - name: Build Arch package (via Docker)
+        if: env.PACKAGE_FORMAT == 'arch' || env.PACKAGE_FORMAT == 'ambos'
         run: |
           SAFE_VERSION=$(echo "${{ env.KERNEL_VERSION }}" | tr '-' '_')
           STAGING="$GITHUB_WORKSPACE/arch-staging"
@@ -140,19 +231,34 @@ jobs:
           printf "pkgname=linux-acer-sw1-011\npkgver=${SAFE_VERSION}\npkgrel=1\narch=('x86_64')\npackage() { cp -a /staging/. \"\${pkgdir}/\"; }\n" > "$PKGOUT/PKGBUILD"
           docker run --rm -v "$STAGING:/staging:ro" -v "$PKGOUT:/pkgout" archlinux:latest bash -c "pacman -Syu --noconfirm base-devel && useradd -m b && chown -R b /pkgout && cd /pkgout && su b -c 'makepkg --noconfirm --nodeps'"
 
+      - name: Save ccache
+        uses: actions/cache/save@v5
+        if: always()
+        with:
+          path: ~/.ccache
+          key: ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ github.run_id }}
+
+      - name: Save generated .config
+        uses: actions/cache/save@v5
+        if: always() && steps.config-restore.outputs.cache-hit != 'true'
+        with:
+          path: kernel-src/.config
+          key: config-${{ env.COMPILER }}-${{ env.CONFIG_SOURCE }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig', 'kernel-src/.config.x86_64') }}-v3
+
       - name: Generate CHANGELOG
         run: |
-          echo "# Linux Kernel ${{ env.KERNEL_VERSION }}" > CHANGELOG.md
-          echo "- **Config:** ${{ env.CONFIG_SOURCE }}" >> CHANGELOG.md
-          if [ -d "kernel-git-backup" ]; then git -C kernel-git-backup log --reverse -n 15 --pretty=format:"- %h %s" >> CHANGELOG.md; fi
+          {
+            echo "# Linux Kernel ${{ env.KERNEL_VERSION }}"
+            echo "- **Toolchain:** ${{ env.COMPILER }} + ${{ env.LINKER }}"
+            echo "- **Config:** ${{ env.CONFIG_SOURCE }}"
+            if [ -d "kernel-git-backup" ]; then git -C kernel-git-backup log --reverse -n 15 --pretty=format:"- %h %s"; fi
+          } > CHANGELOG.md
 
       - name: Create GitHub Release
         run: |
           mkdir -p release_assets
           cp /tmp/*.deb release_assets/ 2>/dev/null || true
           cp arch-packages/*.pkg.tar.* release_assets/ 2>/dev/null || true
-          
-          # Se añade --repo para evitar el error de "not a git repository"
           gh release create "${{ env.RELEASE_TAG }}" release_assets/* \
             --repo ${{ github.repository }} \
             --title "Linux Kernel ${{ env.KERNEL_VERSION }} (${{ env.CONFIG_SOURCE }})" \
