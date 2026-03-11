@@ -28,7 +28,7 @@ on:
         options:
           - sw1-011
           - .config
-        default: sw1-011
+        default: .config
       prerelease:
         description: 'Marcar como pre-release'
         required: false
@@ -335,12 +335,12 @@ jobs:
 
           echo "2️⃣  KERNEL .CONFIG (específico del compilador):"
           if [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
-            echo "   ✅ RESTAURADO: .config cacheado para ${{ env.COMPILER }}"
+            echo "   ✅ RESTAURADO: ${{ env.CONFIG_SOURCE }}" cacheado para ${{ env.COMPILER }}"
             if [ -f kernel-src/.config ]; then
               echo "   📅 Timestamp: $(stat -c %y kernel-src/.config 2>/dev/null || stat -f %Sm kernel-src/.config)"
             fi
           else
-            echo "   ⚠️  SE GENERARÁ: .config nuevo desde defconfig para ${{ env.COMPILER }}"
+            echo "   ⚠️  SE GENERARÁ: .config nuevo desde ${{ env.CONFIG_SOURCE }}" para ${{ env.COMPILER }}"
             echo "   ⚠️  Esto INVALIDARÁ entradas del ccache (cambian los timestamps)"
           fi
           echo ""
@@ -398,7 +398,7 @@ jobs:
           echo "🔧 Configurando kernel para ${{ env.COMPILER }}..."
 
           if [ -f .config ] && [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
-            echo "✅ Usando .config cacheado para ${{ env.COMPILER }} (preserva timestamps para ccache)"
+            echo "✅ Usando ${{ env.CONFIG_SOURCE }}" cacheado para ${{ env.COMPILER }} (preserva timestamps para ccache)"
             echo "   Omitiendo configuración para preservar validez del caché"
             make -s olddefconfig > /dev/null 2>&1
           else
@@ -500,6 +500,7 @@ jobs:
           echo "Ccache: $(ccache --version | head -1)"
           echo "Linker: ${{ env.LINKER }}"
           echo "CPU Cores: $NCPUS"
+          echo "Config usado: ${{ env.CONFIG_SOURCE }}"
           echo "Jobs en paralelo: $JOBS"
           echo "Versión del kernel: ${{ env.KERNEL_VERSION }}"
           echo "Formato de paquete: ${{ env.PACKAGE_FORMAT }}"
@@ -912,8 +913,6 @@ jobs:
             exit 1
           }
 
-      # ── Fin bloque Arch ────────────────────────────────────────────────────
-
       - name: Generate CHANGELOG
         run: |
           BUILD_TIME="${{ env.BUILD_TIME }}"
@@ -1248,6 +1247,7 @@ jobs:
           echo "Versión del kernel: ${{ env.KERNEL_VERSION }}"
           echo "Release Tag: ${{ env.RELEASE_TAG }}"
           echo "Toolchain: ${{ env.COMPILER }} + ${{ env.LINKER }}"
+          echo "Configuracion usada: ${{ env.CONFIG_SOURCE }}"
           echo "Formato de paquete: ${{ env.PACKAGE_FORMAT }}"
           echo "Tiempo de build: $((BUILD_TIME / 60))m $((BUILD_TIME % 60))s"
           echo ""
