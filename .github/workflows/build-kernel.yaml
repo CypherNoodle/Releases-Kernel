@@ -236,7 +236,7 @@ jobs:
               sudo apt-get install -y -qq mold || echo "⚠️  mold no disponible"
               ;;
             "gcc-ld")
-              echo "📦 Usando GCC + ld (por defecto, sin paquetes extra)"
+              echo "📦 Usando GCC + ld"
               ;;
             "clang-lld")
               echo "📦 Instalando Clang + lld..."
@@ -333,7 +333,7 @@ jobs:
           fi
           echo ""
 
-          echo "2️⃣  KERNEL .CONFIG (específico del compilador):"
+          echo "2️⃣  KERNEL .CONFIG:"
           if [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
             echo "   ✅ RESTAURADO: ${{ env.CONFIG_SOURCE }}" cacheado para ${{ env.COMPILER }}"
             if [ -f kernel-src/.config ]; then
@@ -426,12 +426,12 @@ jobs:
           echo "Compilador: ${{ env.COMPILER }}"
           echo "Linker: ${{ env.LINKER }}"
           if [ "${{ env.COMPILER }}" = "clang" ]; then
-            echo "Optimización: x86-64-v2 (optimización genérica)"
-            echo "LTO: desactivado (establecido explícitamente)"
-            echo "CFI: desactivado (establecido explícitamente)"
-            echo "AutoFDO: desactivado (desde defconfig)"
-            echo "KMSAN: desactivado (establecido explícitamente)"
-            echo "RANDSTRUCT: ninguno (establecido explícitamente)"
+            echo "Optimización: x86-64-v2"
+            echo "LTO: desactivado"
+            echo "CFI: desactivado"
+            echo "AutoFDO: desactivado"
+            echo "KMSAN: desactivado"
+            echo "RANDSTRUCT: ninguno"
           else
             echo "Optimización: Intel x5-Z8300 (Silvermont)"
           fi
