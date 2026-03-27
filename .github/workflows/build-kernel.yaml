@@ -398,7 +398,7 @@ jobs:
           echo "🔧 Configurando kernel para ${{ env.COMPILER }}..."
 
           if [ -f .config ] && [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
-            echo "✅ Usando ${{ env.CONFIG_SOURCE }}" cacheado para ${{ env.COMPILER }} (preserva timestamps para ccache)"
+            echo "✅ Usando ${{ env.CONFIG_SOURCE }}" cacheado para ${{ env.COMPILER }}"
             echo "   Omitiendo configuración para preservar validez del caché"
             make -s olddefconfig > /dev/null 2>&1
           else
