@@ -433,7 +433,7 @@ jobs:
             echo "KMSAN: desactivado"
             echo "RANDSTRUCT: ninguno"
           else
-            echo "Optimización: Intel x5-Z8300 (Silvermont)"
+            echo "Optimización: Intel Silvermont"
           fi
 
       - name: Compile kernel
