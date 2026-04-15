@@ -230,7 +230,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
 
       - name: Restore APT cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache@v4
         id: apt-restore
         with:
           path: ~/apt-cache
@@ -279,14 +279,14 @@ jobs:
           echo "=== Toolchain seleccionado: ${{ env.COMPILER }} + ${{ env.LINKER }} ==="
 
       - name: Save APT cache
-        uses: actions/cache/save@v5
+        uses: actions/cache@v4
         if: always() && steps.apt-restore.outputs.cache-hit != 'true'
         with:
           path: ~/apt-cache
           key: apt-${{ runner.os }}-v4
 
       - name: Restore ccache
-        uses: actions/cache/restore@v5
+        uses: actions/cache@v4
         id: ccache-restore
         with:
           path: ~/.ccache
@@ -297,7 +297,7 @@ jobs:
             ccache-${{ env.COMPILER }}-${{ runner.os }}-
 
       - name: Restore kernel build tools
-        uses: actions/cache/restore@v5
+        uses: actions/cache@v4
         id: kernel-tools-restore
         with:
           path: |
@@ -311,7 +311,7 @@ jobs:
             kernel-tools-${{ runner.os }}-
 
       - name: Restore generated .config
-        uses: actions/cache/restore@v5
+        uses: actions/cache@v4
         id: config-restore
         with:
           path: kernel-src/.config
@@ -448,6 +448,10 @@ jobs:
             if [ -n "$CRITICAL_MISSING" ]; then exit 1; fi
           fi
 
+          if ! grep -qE "CONFIG_FRAME_POINTER=y|CONFIG_FUNCTION_TRACER=y|CONFIG_STACK_TRACER=y" .config; then
+            echo "KCFLAGS=${{ env.KCFLAGS }} -fomit-frame-pointer" >> $GITHUB_ENV
+          fi
+
           echo ""
           echo "=== Resumen de configuración ==="
           echo "Config usado: ${{ env.CONFIG_SOURCE }}"
@@ -528,11 +532,8 @@ jobs:
           fi
           echo "Ccache: $(ccache --version | head -1)"
           echo "Linker: ${{ env.LINKER }}"
-          echo "CPU Cores: $NCPUS"
-          echo "Config usado: ${{ env.CONFIG_SOURCE }}"
-          echo "Jobs en paralelo: $JOBS"
+          echo "Jobs en paralelo: ${{ env.JOBS }}"
           echo "Versión del kernel: ${{ env.KERNEL_VERSION }}"
-          echo "Formato de paquete: ${{ env.PACKAGE_FORMAT }}"
           echo "=========================================="
           echo ""
 
@@ -544,9 +545,8 @@ jobs:
           START_TIME=$(date +%s)
 
           echo "🔨 Compilando bzImage + módulos..."
-          make -j$JOBS \
+          make -j${{ env.JOBS }} \
             KERNELRELEASE=${{ env.KERNEL_VERSION }} \
-            KCONFIG_NOTIMESTAMP=1 \
             bzImage modules 2>&1 | tee build.log
 
           END_TIME=$(date +%s)
@@ -605,33 +605,26 @@ jobs:
           export LOCALVERSION=""
           export DEBIAN_FRONTEND=noninteractive
           export DEBCONF_NONINTERACTIVE_SEEN=true
-          export KCONFIG_ALLCONFIG=.config
-          export KCONFIG_NOTIMESTAMP=1
-          export KBUILD_BUILD_VERSION=1
-
-          JOBS=$(($(nproc) + 2))
 
           echo "🔨 Empaquetando .deb (reutiliza objetos ya compilados)..."
 
-          yes "" 2>/dev/null | make -s -j$JOBS \
+          yes "" 2>/dev/null | make -s -j${{ env.JOBS }} \
             KERNELRELEASE=${{ env.KERNEL_VERSION }} \
             KDEB_PKGVERSION=${{ env.KERNEL_VERSION }}-1 \
             KDEB_SOURCENAME=linux-custom \
-            KDEB_COMPRESS=xz \
+            KDEB_COMPRESS=zstd \
             INSTALL_MOD_STRIP=1 \
             CONFIG_SHELL=/bin/bash \
-            KCONFIG_NOTIMESTAMP=1 \
             KCONFIG_ALLCONFIG=$(pwd)/.config \
             bindeb-pkg 2>&1 | tee -a build.log || {
               echo "⚠️  Build con 'yes' falló, reintentando sin pipe..."
-              make -s -j$JOBS \
+              make -s -j${{ env.JOBS }} \
                 KERNELRELEASE=${{ env.KERNEL_VERSION }} \
                 KDEB_PKGVERSION=${{ env.KERNEL_VERSION }}-1 \
                 KDEB_SOURCENAME=linux-custom \
-                KDEB_COMPRESS=xz \
+                KDEB_COMPRESS=zstd \
                 INSTALL_MOD_STRIP=1 \
                 CONFIG_SHELL=/bin/bash \
-                KCONFIG_NOTIMESTAMP=1 \
                 KCONFIG_ALLCONFIG=$(pwd)/.config \
                 bindeb-pkg 2>&1 | tee -a build.log
             }
@@ -727,14 +720,14 @@ jobs:
           echo "=========================================="
 
       - name: Save ccache
-        uses: actions/cache/save@v5
+        uses: actions/cache@v4
         if: always()
         with:
           path: ~/.ccache
           key: ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ github.run_id }}
 
       - name: Save kernel build tools
-        uses: actions/cache/save@v5
+        uses: actions/cache@v4
         if: always() && steps.kernel-tools-restore.outputs.cache-hit != 'true'
         with:
           path: |
@@ -745,7 +738,7 @@ jobs:
           key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
 
       - name: Save generated .config
-        uses: actions/cache/save@v5
+        uses: actions/cache@v4
         if: always() && steps.config-restore.outputs.cache-hit != 'true'
         with:
           path: kernel-src/.config
@@ -918,8 +911,7 @@ jobs:
 
               pacman-key --init
               pacman-key --populate archlinux
-              pacman -Syu --noconfirm
-              pacman -S --noconfirm --needed base-devel
+              pacman -Sy --noconfirm --needed base-devel
 
               # makepkg no puede correr como root; se crea un usuario temporal
               useradd -m builder
@@ -1197,7 +1189,7 @@ jobs:
           echo "=========================================="
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v7.0.0
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: kernel-${{ env.KERNEL_VERSION }}-build-${{ github.run_number }}
