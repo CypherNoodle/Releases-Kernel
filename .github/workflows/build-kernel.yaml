@@ -29,12 +29,12 @@ on:
           - sw1-011
           - np300e4c
           - .config
-        default: np300e4c
+        default: .config
       prerelease:
         description: 'Marcar como pre-release'
         required: false
         type: boolean
-        default: true
+        default: false
   schedule:
     - cron: '0 0 */5 * *'
 
