@@ -44,7 +44,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout kernel source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           repository: CypherNoodle/linux-Sw1-011
           path: kernel-src
@@ -164,6 +164,42 @@ jobs:
           echo "linker=$LINKER" >> $GITHUB_OUTPUT
           echo "Toolchain seleccionado: $COMPILER + $LINKER"
 
+          # Configurar variables de compilación comunes
+          NCPUS=$(nproc)
+          JOBS=$((NCPUS + 2))
+          echo "JOBS=$JOBS" >> $GITHUB_ENV
+
+          if [ "$COMPILER" = "clang" ]; then
+            echo "CC=ccache clang" >> $GITHUB_ENV
+            echo "CXX=ccache clang++" >> $GITHUB_ENV
+            echo "HOSTCC=clang" >> $GITHUB_ENV
+            echo "HOSTCXX=clang++" >> $GITHUB_ENV
+            echo "LLVM=1" >> $GITHUB_ENV
+            echo "LLVM_IAS=1" >> $GITHUB_ENV
+
+            # Optimización x86-64-v2 para Clang (soporta Silvermont)
+            KCFLAGS="-O2 -march=x86-64-v2 -mtune=generic -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128"
+
+            if [ "$LINKER" = "lld" ]; then
+              echo "LDFLAGS=-fuse-ld=lld -Wl,--hash-style=gnu -Wl,--build-id=sha1" >> $GITHUB_ENV
+            fi
+          else
+            echo "CC=ccache gcc" >> $GITHUB_ENV
+            echo "CXX=ccache g++" >> $GITHUB_ENV
+
+            # Optimización específica para Silvermont con GCC
+            KCFLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16"
+
+            if [ "$LINKER" = "mold" ]; then
+              echo "LDFLAGS=-fuse-ld=mold -Wl,--hash-style=gnu -Wl,--build-id=sha1" >> $GITHUB_ENV
+            fi
+          fi
+          echo "KCFLAGS=$KCFLAGS" >> $GITHUB_ENV
+          echo "KCPPFLAGS=-D_FORTIFY_SOURCE=2" >> $GITHUB_ENV
+          echo "KDOC_WERROR=0" >> $GITHUB_ENV
+          echo "KCONFIG_NOTIMESTAMP=1" >> $GITHUB_ENV
+          echo "KBUILD_BUILD_VERSION=1" >> $GITHUB_ENV
+
           # Formato de paquete — para el schedule se usa 'deb' por defecto
           PACKAGE_FORMAT="${{ github.event.inputs.package_format }}"
           if [ -z "$PACKAGE_FORMAT" ]; then
@@ -213,7 +249,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
 
       - name: Restore APT cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache@v4
         id: apt-restore
         with:
           path: ~/apt-cache
@@ -262,14 +298,14 @@ jobs:
           echo "=== Toolchain seleccionado: ${{ env.COMPILER }} + ${{ env.LINKER }} ==="
 
       - name: Save APT cache
-        uses: actions/cache/save@v5
+        uses: actions/cache@v4
         if: always() && steps.apt-restore.outputs.cache-hit != 'true'
         with:
           path: ~/apt-cache
           key: apt-${{ runner.os }}-v4
 
       - name: Restore ccache
-        uses: actions/cache/restore@v5
+        uses: actions/cache@v4
         id: ccache-restore
         with:
           path: ~/.ccache
@@ -280,7 +316,7 @@ jobs:
             ccache-${{ env.COMPILER }}-${{ runner.os }}-
 
       - name: Restore kernel build tools
-        uses: actions/cache/restore@v5
+        uses: actions/cache@v4
         id: kernel-tools-restore
         with:
           path: |
@@ -294,7 +330,7 @@ jobs:
             kernel-tools-${{ runner.os }}-
 
       - name: Restore generated .config
-        uses: actions/cache/restore@v5
+        uses: actions/cache@v4
         id: config-restore
         with:
           path: kernel-src/.config
@@ -419,6 +455,10 @@ jobs:
           done
           if [ -n "$CRITICAL_MISSING" ]; then exit 1; fi
 
+          if ! grep -qE "CONFIG_FRAME_POINTER=y|CONFIG_FUNCTION_TRACER=y|CONFIG_STACK_TRACER=y" .config; then
+            echo "KCFLAGS=${{ env.KCFLAGS }} -fomit-frame-pointer" >> $GITHUB_ENV
+          fi
+
           echo ""
           echo "=== Resumen de configuración ==="
           echo "Config usado: ${{ env.CONFIG_SOURCE }}"
@@ -442,68 +482,14 @@ jobs:
           export PATH="/usr/lib/ccache:$PATH"
           export CCACHE_DIR="$HOME/.ccache"
 
-          if [ "${{ env.COMPILER }}" = "clang" ]; then
-            export CC="ccache clang"
-            export CXX="ccache clang++"
-            export HOSTCC="clang"
-            export HOSTCXX="clang++"
-            export LLVM=1
-            export LLVM_IAS=1
-
-            CLANG_FLAGS="-O2 -march=x86-64-v2 -mtune=generic -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128"
-
-            export KCFLAGS="$CLANG_FLAGS"
-
-            if [ "${{ env.LINKER }}" = "lld" ]; then
-              export LDFLAGS="-fuse-ld=lld -Wl,--hash-style=gnu -Wl,--build-id=sha1"
-              echo "✅ Usando Clang + lld"
-            fi
-          else
-            export CC="ccache gcc"
-            export CXX="ccache g++"
-
-            GCC_FLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16"
-
-            export KCFLAGS="$GCC_FLAGS"
-
-            if [ "${{ env.LINKER }}" = "mold" ]; then
-              if command -v mold &> /dev/null; then
-                export LDFLAGS="-fuse-ld=mold -Wl,--hash-style=gnu -Wl,--build-id=sha1"
-                echo "✅ Usando GCC + mold (ultra-rápido)"
-              else
-                echo "⚠️  mold no disponible, usando ld por defecto"
-              fi
-            else
-              echo "✅ Usando GCC + ld (por defecto)"
-            fi
-          fi
-
-          export KCPPFLAGS="-D_FORTIFY_SOURCE=2"
-          export KDOC_WERROR=0
-          export LOCALVERSION=""
-          export KCONFIG_NOTIMESTAMP=1
-          export KBUILD_BUILD_VERSION=1
-
-          NCPUS=$(nproc)
-          JOBS=$((NCPUS + 2))
-
           echo "=========================================="
           echo "CONFIGURACIÓN DE BUILD"
           echo "=========================================="
-          if [ "${{ env.COMPILER }}" = "clang" ]; then
-            echo "Compilador: $(clang --version | head -1)"
-            echo "Arquitectura objetivo: x86-64-v2 (optimización genérica)"
-          else
-            echo "Compilador: $(gcc --version | head -1)"
-            echo "Arquitectura objetivo: Intel x5-Z8300 (Silvermont)"
-          fi
-          echo "Ccache: $(ccache --version | head -1)"
+          echo "Compilador: ${{ env.CC }}"
+          echo "KCFLAGS: ${{ env.KCFLAGS }}"
           echo "Linker: ${{ env.LINKER }}"
-          echo "CPU Cores: $NCPUS"
-          echo "Config usado: ${{ env.CONFIG_SOURCE }}"
-          echo "Jobs en paralelo: $JOBS"
+          echo "Jobs en paralelo: ${{ env.JOBS }}"
           echo "Versión del kernel: ${{ env.KERNEL_VERSION }}"
-          echo "Formato de paquete: ${{ env.PACKAGE_FORMAT }}"
           echo "=========================================="
           echo ""
 
@@ -515,9 +501,8 @@ jobs:
           START_TIME=$(date +%s)
 
           echo "🔨 Compilando bzImage + módulos..."
-          make -j$JOBS \
+          make -j${{ env.JOBS }} \
             KERNELRELEASE=${{ env.KERNEL_VERSION }} \
-            KCONFIG_NOTIMESTAMP=1 \
             bzImage modules 2>&1 | tee build.log
 
           END_TIME=$(date +%s)
@@ -538,71 +523,28 @@ jobs:
         run: |
           export PATH="/usr/lib/ccache:$PATH"
           export CCACHE_DIR="$HOME/.ccache"
-
-          if [ "${{ env.COMPILER }}" = "clang" ]; then
-           export CC="ccache clang"
-           export CXX="ccache clang++"
-           export HOSTCC="clang"
-           export HOSTCXX="clang++"
-           export LLVM=1
-           export LLVM_IAS=1
-
-           CLANG_FLAGS="-O2 -march=x86-64-v2 -mtune=generic -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128"
-           if ! grep -qE "CONFIG_FRAME_POINTER=y|CONFIG_FUNCTION_TRACER=y|CONFIG_STACK_TRACER=y" .config; then
-             CLANG_FLAGS="$CLANG_FLAGS -fomit-frame-pointer"
-           fi
-           export KCFLAGS="$CLANG_FLAGS"
-
-           if [ "${{ env.LINKER }}" = "lld" ]; then
-             export LDFLAGS="-fuse-ld=lld -Wl,--hash-style=gnu -Wl,--build-id=sha1"
-           fi
-          else
-           export CC="ccache gcc"
-           export CXX="ccache g++"
-
-           GCC_FLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16"
-           if ! grep -qE "CONFIG_FRAME_POINTER=y|CONFIG_FUNCTION_TRACER=y|CONFIG_STACK_TRACER=y" .config; then
-             GCC_FLAGS="$GCC_FLAGS -fomit-frame-pointer"
-           fi
-           export KCFLAGS="$GCC_FLAGS"
-
-           if [ "${{ env.LINKER }}" = "mold" ] && command -v mold &> /dev/null; then
-             export LDFLAGS="-fuse-ld=mold -Wl,--hash-style=gnu -Wl,--build-id=sha1"
-           fi
-          fi
-
-          export KCPPFLAGS="-D_FORTIFY_SOURCE=2"
-          export KDOC_WERROR=0
-          export LOCALVERSION=""
           export DEBIAN_FRONTEND=noninteractive
           export DEBCONF_NONINTERACTIVE_SEEN=true
-          export KCONFIG_ALLCONFIG=.config
-          export KCONFIG_NOTIMESTAMP=1
-          export KBUILD_BUILD_VERSION=1
-
-          JOBS=$(($(nproc) + 2))
 
           echo "🔨 Empaquetando .deb (reutiliza objetos ya compilados)..."
 
-          yes "" 2>/dev/null | make -s -j$JOBS \
+          yes "" 2>/dev/null | make -s -j${{ env.JOBS }} \
             KERNELRELEASE=${{ env.KERNEL_VERSION }} \
             KDEB_PKGVERSION=${{ env.KERNEL_VERSION }}-1 \
             KDEB_SOURCENAME=linux-custom \
-            KDEB_COMPRESS=xz \
+            KDEB_COMPRESS=zstd \
             INSTALL_MOD_STRIP=1 \
             CONFIG_SHELL=/bin/bash \
-            KCONFIG_NOTIMESTAMP=1 \
             KCONFIG_ALLCONFIG=$(pwd)/.config \
             bindeb-pkg 2>&1 | tee -a build.log || {
               echo "⚠️  Build con 'yes' falló, reintentando sin pipe..."
-              make -s -j$JOBS \
+              make -s -j${{ env.JOBS }} \
                 KERNELRELEASE=${{ env.KERNEL_VERSION }} \
                 KDEB_PKGVERSION=${{ env.KERNEL_VERSION }}-1 \
                 KDEB_SOURCENAME=linux-custom \
-                KDEB_COMPRESS=xz \
+                KDEB_COMPRESS=zstd \
                 INSTALL_MOD_STRIP=1 \
                 CONFIG_SHELL=/bin/bash \
-                KCONFIG_NOTIMESTAMP=1 \
                 KCONFIG_ALLCONFIG=$(pwd)/.config \
                 bindeb-pkg 2>&1 | tee -a build.log
             }
@@ -698,14 +640,14 @@ jobs:
           echo "=========================================="
 
       - name: Save ccache
-        uses: actions/cache/save@v5
+        uses: actions/cache@v4
         if: always()
         with:
           path: ~/.ccache
           key: ccache-${{ env.COMPILER }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ github.run_id }}
 
       - name: Save kernel build tools
-        uses: actions/cache/save@v5
+        uses: actions/cache@v4
         if: always() && steps.kernel-tools-restore.outputs.cache-hit != 'true'
         with:
           path: |
@@ -716,7 +658,7 @@ jobs:
           key: kernel-tools-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}
 
       - name: Save generated .config
-        uses: actions/cache/save@v5
+        uses: actions/cache@v4
         if: always() && steps.config-restore.outputs.cache-hit != 'true'
         with:
           path: kernel-src/.config
@@ -889,8 +831,7 @@ jobs:
 
               pacman-key --init
               pacman-key --populate archlinux
-              pacman -Syu --noconfirm
-              pacman -S --noconfirm --needed base-devel
+              pacman -Sy --noconfirm --needed base-devel
 
               # makepkg no puede correr como root; se crea un usuario temporal
               useradd -m builder
@@ -1168,7 +1109,7 @@ jobs:
           echo "=========================================="
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v7.0.0
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: kernel-${{ env.KERNEL_VERSION }}-build-${{ github.run_number }}
