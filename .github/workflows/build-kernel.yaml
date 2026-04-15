@@ -455,6 +455,10 @@ jobs:
           done
           if [ -n "$CRITICAL_MISSING" ]; then exit 1; fi
 
+          if ! grep -qE "CONFIG_FRAME_POINTER=y|CONFIG_FUNCTION_TRACER=y|CONFIG_STACK_TRACER=y" .config; then
+            echo "KCFLAGS=${{ env.KCFLAGS }} -fomit-frame-pointer" >> $GITHUB_ENV
+          fi
+
           echo ""
           echo "=== Resumen de configuración ==="
           echo "Config usado: ${{ env.CONFIG_SOURCE }}"
@@ -827,7 +831,7 @@ jobs:
 
               pacman-key --init
               pacman-key --populate archlinux
-              pacman -S --noconfirm --needed fakeroot binutils
+              pacman -Sy --noconfirm --needed base-devel
 
               # makepkg no puede correr como root; se crea un usuario temporal
               useradd -m builder
