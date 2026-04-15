@@ -496,15 +496,13 @@ jobs:
           echo "Config cacheado: ${{ steps.config-restore.outputs.cache-hit }}"
           echo "Compilador: ${{ env.COMPILER }}"
           echo "Linker: ${{ env.LINKER }}"
+          echo "Optimización: ${{ env.PLATFORM_NAME }}"
           if [ "${{ env.COMPILER }}" = "clang" ]; then
-            echo "Optimización: x86-64-v2"
             echo "LTO: desactivado"
             echo "CFI: desactivado"
             echo "AutoFDO: desactivado"
             echo "KMSAN: desactivado"
             echo "RANDSTRUCT: ninguno"
-          else
-            echo "Optimización: Intel X5-Z8300 (Silvermont)"
           fi
 
       - name: Compile kernel
