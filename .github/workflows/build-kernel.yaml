@@ -52,6 +52,12 @@ jobs:
           fetch-depth: 32
           filter: blob:limit=1m
 
+      - name: Checkout releases repo (this repo)
+        uses: actions/checkout@v4
+        with:
+          path: releases-repo
+          clean: false
+
       - name: Setup tmpfs build directory
         run: |
           echo "🚀 Configurando tmpfs para I/O más rápido..."
@@ -344,7 +350,7 @@ jobs:
         id: config-restore
         with:
           path: kernel-src/.config
-          key: config-${{ env.COMPILER }}-${{ env.CONFIG_SOURCE }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig', 'kernel-src/.config.x86_64', 'samsung_np300e4c_defconfig') }}-v3
+          key: config-${{ env.COMPILER }}-${{ env.CONFIG_SOURCE }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig', 'kernel-src/.config.x86_64', 'releases-repo/samsung_np300e4c_defconfig') }}-v3
 
       - name: Check cache restoration
         run: |
@@ -451,7 +457,7 @@ jobs:
             if [ "${{ env.CONFIG_SOURCE }}" == ".config" ]; then
               cp .config.x86_64 .config
             elif [ "${{ env.CONFIG_SOURCE }}" == "np300e4c" ]; then
-              cp "$GITHUB_WORKSPACE/samsung_np300e4c_defconfig" arch/x86/configs/
+              cp "$GITHUB_WORKSPACE/releases-repo/samsung_np300e4c_defconfig" arch/x86/configs/
               make -s samsung_np300e4c_defconfig
             else
               make -s acer_sw1_011_defconfig
@@ -687,7 +693,7 @@ jobs:
         if: always() && steps.config-restore.outputs.cache-hit != 'true'
         with:
           path: kernel-src/.config
-          key: config-${{ env.COMPILER }}-${{ env.CONFIG_SOURCE }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig', 'kernel-src/.config.x86_64', 'samsung_np300e4c_defconfig') }}-v3
+          key: config-${{ env.COMPILER }}-${{ env.CONFIG_SOURCE }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig', 'kernel-src/.config.x86_64', 'releases-repo/samsung_np300e4c_defconfig') }}-v3
 
       - name: Save build metrics
         if: always()
