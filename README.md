@@ -28,8 +28,8 @@ Or manually trigger the workflow:
 
 ## ⚙️ Build Information
 
-- **Target Platform:** Intel x5-Z8300 (Silvermont)
-- **Compiler Optimizations:** `-march=silvermont -mtune=silvermont -O2`
+- **Target Platforms:** Intel x5-Z8300 (Silvermont), Samsung NP300E4C (Sandy Bridge)
+- **Compiler Optimizations:** Dynamic `-march` (Silvermont or Sandy Bridge)
 - **Build System:** GitHub Actions with advanced caching
 - **Linker:** Mold (ultra-fast, 3-5x faster than GNU ld)
 - **Automatic Builds:** Every 5 days (maintains warm cache)
@@ -171,6 +171,12 @@ The build system uses aggressive caching to speed up compilation:
 This kernel uses a custom configuration optimized for the Acer Switch One SW1-011.
 
 #### Kernel Configuration
+
+##### Acer Switch One 10 (SW1-011)
+- **Defconfig:** `acer_sw1_011_defconfig` (en el kernel)
+
+##### Samsung NP300E4C-A0FCL
+- **Defconfig:** `samsung_np300e4c_defconfig` (en este repo)
 
 The build uses `acer_sw1_011_defconfig` located in `arch/x86/configs/`. This configuration is specifically tuned for:
 

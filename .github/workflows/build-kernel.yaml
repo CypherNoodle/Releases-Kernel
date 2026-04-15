@@ -43,8 +43,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout releases repo
+        uses: actions/checkout@v4
+        with:
+          path: releases-repo
+          clean: false
+
       - name: Checkout kernel source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           repository: CypherNoodle/linux-Sw1-011
           path: kernel-src
@@ -163,6 +169,17 @@ jobs:
           echo "compiler=$COMPILER" >> $GITHUB_OUTPUT
           echo "linker=$LINKER" >> $GITHUB_OUTPUT
           echo "Toolchain seleccionado: $COMPILER + $LINKER"
+
+          # Determinar arquitectura de CPU para flags
+          CONFIG_SOURCE="${{ github.event.inputs.config_source || 'sw1-011' }}"
+          if [ "$CONFIG_SOURCE" = "np300e4c" ]; then
+            CPU_ARCH="sandybridge"
+          else
+            CPU_ARCH="silvermont"
+          fi
+          echo "CPU_ARCH=$CPU_ARCH" >> $GITHUB_ENV
+          echo "cpu_arch=$CPU_ARCH" >> $GITHUB_OUTPUT
+          echo "Arquitectura de CPU: $CPU_ARCH"
 
           # Formato de paquete — para el schedule se usa 'deb' por defecto
           PACKAGE_FORMAT="${{ github.event.inputs.package_format }}"
@@ -404,6 +421,9 @@ jobs:
           else
             if [ "${{ env.CONFIG_SOURCE }}" == ".config" ]; then
               cp .config.x86_64 .config
+            elif [ "${{ env.CONFIG_SOURCE }}" == "np300e4c" ]; then
+              cp ${{ github.workspace }}/releases-repo/samsung_np300e4c_defconfig arch/x86/configs/
+              make -s samsung_np300e4c_defconfig
             else
               make -s acer_sw1_011_defconfig
             fi
@@ -433,7 +453,7 @@ jobs:
             echo "KMSAN: desactivado"
             echo "RANDSTRUCT: ninguno"
           else
-            echo "Optimización: Intel X5-Z8300 (Silvermont)"
+            echo "Optimización: ${{ env.CPU_ARCH }}"
           fi
 
       - name: Compile kernel
@@ -462,7 +482,7 @@ jobs:
             export CC="ccache gcc"
             export CXX="ccache g++"
 
-            GCC_FLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16"
+            GCC_FLAGS="-O2 -march=${{ env.CPU_ARCH }} -mtune=${{ env.CPU_ARCH }} -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16"
 
             export KCFLAGS="$GCC_FLAGS"
 
@@ -495,7 +515,7 @@ jobs:
             echo "Arquitectura objetivo: x86-64-v2 (optimización genérica)"
           else
             echo "Compilador: $(gcc --version | head -1)"
-            echo "Arquitectura objetivo: Intel x5-Z8300 (Silvermont)"
+            echo "Arquitectura objetivo: ${{ env.CPU_ARCH }}"
           fi
           echo "Ccache: $(ccache --version | head -1)"
           echo "Linker: ${{ env.LINKER }}"
@@ -560,7 +580,7 @@ jobs:
            export CC="ccache gcc"
            export CXX="ccache g++"
 
-           GCC_FLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16"
+           GCC_FLAGS="-O2 -march=${{ env.CPU_ARCH }} -mtune=${{ env.CPU_ARCH }} -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16"
            if ! grep -qE "CONFIG_FRAME_POINTER=y|CONFIG_FUNCTION_TRACER=y|CONFIG_STACK_TRACER=y" .config; then
              GCC_FLAGS="$GCC_FLAGS -fomit-frame-pointer"
            fi
@@ -801,9 +821,9 @@ jobs:
 
           # ── Determinar descripción según toolchain ─────────────────────────
           if [ "${{ env.COMPILER }}" = "clang" ]; then
-            PKGDESC="Kernel Linux ${{ env.KERNEL_VERSION }} para Acer SW1-011 (Clang+LLD, x86-64-v2)"
+            PKGDESC="Kernel Linux ${{ env.KERNEL_VERSION }} para ${{ env.CONFIG_SOURCE }} (Clang+LLD, x86-64-v2)"
           else
-            PKGDESC="Kernel Linux ${{ env.KERNEL_VERSION }} para Acer SW1-011 (GCC+${{ env.LINKER }}, Silvermont)"
+            PKGDESC="Kernel Linux ${{ env.KERNEL_VERSION }} para ${{ env.CONFIG_SOURCE }} (GCC+${{ env.LINKER }}, Silvermont)"
           fi
 
           # ── Escribir preset y hook en el staging ANTES de que makepkg corra ──
@@ -997,8 +1017,8 @@ jobs:
               echo "- **Toolchain:** ${{ env.COMPILER }} + ${{ env.LINKER }}"
               echo "- **Configuracion usada:** ${{ env.CONFIG_SOURCE }}"
               if [ "${{ env.COMPILER }}" = "gcc" ]; then
-                echo "- **Plataforma objetivo:** Intel x5-Z8300 (Silvermont)"
-                echo "- **Flags del compilador:** -march=silvermont -mtune=silvermont"
+                echo "- **Plataforma objetivo:** ${{ env.CPU_ARCH }}"
+                echo "- **Flags del compilador:** -march=${{ env.CPU_ARCH }} -mtune=${{ env.CPU_ARCH }}"
               else
                 echo "- **Plataforma objetivo:** x86-64-v2 (genérico)"
                 echo "- **Flags del compilador:** -march=x86-64-v2 -mtune=generic"
@@ -1042,8 +1062,8 @@ jobs:
               echo "- **Toolchain:** ${{ env.COMPILER }} + ${{ env.LINKER }}"
               echo "- **Configuracion usada:** ${{ env.CONFIG_SOURCE }}"
               if [ "${{ env.COMPILER }}" = "gcc" ]; then
-                echo "- **Plataforma objetivo:** Intel x5-Z8300 (Silvermont)"
-                echo "- **Flags del compilador:** -march=silvermont -mtune=silvermont"
+                echo "- **Plataforma objetivo:** ${{ env.CPU_ARCH }}"
+                echo "- **Flags del compilador:** -march=${{ env.CPU_ARCH }} -mtune=${{ env.CPU_ARCH }}"
               else
                 echo "- **Plataforma objetivo:** x86-64-v2 (genérico)"
                 echo "- **Flags del compilador:** -march=x86-64-v2 -mtune=generic"
