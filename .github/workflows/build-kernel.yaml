@@ -27,6 +27,7 @@ on:
         type: choice
         options:
           - sw1-011
+          - np300e4c
           - .config
         default: .config
       prerelease:
@@ -156,7 +157,8 @@ jobs:
               exit 1
               ;;
           esac
-          echo "CONFIG_SOURCE=${{ github.event.inputs.config_source || 'sw1-011' }}" >> $GITHUB_ENV
+          CONFIG_SOURCE="${{ github.event.inputs.config_source || 'sw1-011' }}"
+          echo "CONFIG_SOURCE=$CONFIG_SOURCE" >> $GITHUB_ENV
 
           echo "COMPILER=$COMPILER" >> $GITHUB_ENV
           echo "LINKER=$LINKER" >> $GITHUB_ENV
@@ -177,8 +179,9 @@ jobs:
             echo "LLVM=1" >> $GITHUB_ENV
             echo "LLVM_IAS=1" >> $GITHUB_ENV
 
-            # Optimización x86-64-v2 para Clang (soporta Silvermont)
+            # Optimización x86-64-v2 para Clang (genérico pero eficiente)
             KCFLAGS="-O2 -march=x86-64-v2 -mtune=generic -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128"
+            echo "PLATFORM_NAME=x86-64-v2 (genérico)" >> $GITHUB_ENV
 
             if [ "$LINKER" = "lld" ]; then
               echo "LDFLAGS=-fuse-ld=lld -Wl,--hash-style=gnu -Wl,--build-id=sha1" >> $GITHUB_ENV
@@ -187,8 +190,15 @@ jobs:
             echo "CC=ccache gcc" >> $GITHUB_ENV
             echo "CXX=ccache g++" >> $GITHUB_ENV
 
-            # Optimización específica para Silvermont con GCC
-            KCFLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16"
+            if [ "$CONFIG_SOURCE" = "np300e4c" ]; then
+              # Optimización específica para Sandy Bridge (Samsung NP300E4C)
+              KCFLAGS="-O2 -march=sandybridge -mtune=sandybridge -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16"
+              echo "PLATFORM_NAME=Samsung NP300E4C (Sandy Bridge)" >> $GITHUB_ENV
+            else
+              # Optimización específica para Silvermont (Acer SW1-011)
+              KCFLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16"
+              echo "PLATFORM_NAME=Intel x5-Z8300 (Silvermont)" >> $GITHUB_ENV
+            fi
 
             if [ "$LINKER" = "mold" ]; then
               echo "LDFLAGS=-fuse-ld=mold -Wl,--hash-style=gnu -Wl,--build-id=sha1" >> $GITHUB_ENV
@@ -334,7 +344,7 @@ jobs:
         id: config-restore
         with:
           path: kernel-src/.config
-          key: config-${{ env.COMPILER }}-${{ env.CONFIG_SOURCE }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig', 'kernel-src/.config.x86_64') }}-v3
+          key: config-${{ env.COMPILER }}-${{ env.CONFIG_SOURCE }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig', 'kernel-src/.config.x86_64', 'samsung_np300e4c_defconfig') }}-v3
 
       - name: Check cache restoration
         run: |
@@ -440,6 +450,9 @@ jobs:
           else
             if [ "${{ env.CONFIG_SOURCE }}" == ".config" ]; then
               cp .config.x86_64 .config
+            elif [ "${{ env.CONFIG_SOURCE }}" == "np300e4c" ]; then
+              cp ../samsung_np300e4c_defconfig arch/x86/configs/
+              make -s samsung_np300e4c_defconfig
             else
               make -s acer_sw1_011_defconfig
             fi
@@ -662,7 +675,7 @@ jobs:
         if: always() && steps.config-restore.outputs.cache-hit != 'true'
         with:
           path: kernel-src/.config
-          key: config-${{ env.COMPILER }}-${{ env.CONFIG_SOURCE }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig', 'kernel-src/.config.x86_64') }}-v3
+          key: config-${{ env.COMPILER }}-${{ env.CONFIG_SOURCE }}-${{ runner.os }}-${{ env.KERNEL_MAJOR_MINOR }}-${{ hashFiles('kernel-src/arch/x86/configs/acer_sw1_011_defconfig', 'kernel-src/.config.x86_64', 'samsung_np300e4c_defconfig') }}-v3
 
       - name: Save build metrics
         if: always()
@@ -937,11 +950,14 @@ jobs:
               echo "- **Tiempo de compilación:** $((BUILD_TIME / 60)) minutos $((BUILD_TIME % 60)) segundos"
               echo "- **Toolchain:** ${{ env.COMPILER }} + ${{ env.LINKER }}"
               echo "- **Configuracion usada:** ${{ env.CONFIG_SOURCE }}"
+              echo "- **Plataforma objetivo:** ${{ env.PLATFORM_NAME }}"
               if [ "${{ env.COMPILER }}" = "gcc" ]; then
-                echo "- **Plataforma objetivo:** Intel x5-Z8300 (Silvermont)"
-                echo "- **Flags del compilador:** -march=silvermont -mtune=silvermont"
+                if [ "${{ env.CONFIG_SOURCE }}" = "np300e4c" ]; then
+                   echo "- **Flags del compilador:** -march=sandybridge -mtune=sandybridge"
+                else
+                   echo "- **Flags del compilador:** -march=silvermont -mtune=silvermont"
+                fi
               else
-                echo "- **Plataforma objetivo:** x86-64-v2 (genérico)"
                 echo "- **Flags del compilador:** -march=x86-64-v2 -mtune=generic"
               fi
               echo ""
@@ -982,11 +998,14 @@ jobs:
               echo "- **Tiempo de compilación:** $((BUILD_TIME / 60)) minutos $((BUILD_TIME % 60)) segundos"
               echo "- **Toolchain:** ${{ env.COMPILER }} + ${{ env.LINKER }}"
               echo "- **Configuracion usada:** ${{ env.CONFIG_SOURCE }}"
+              echo "- **Plataforma objetivo:** ${{ env.PLATFORM_NAME }}"
               if [ "${{ env.COMPILER }}" = "gcc" ]; then
-                echo "- **Plataforma objetivo:** Intel x5-Z8300 (Silvermont)"
-                echo "- **Flags del compilador:** -march=silvermont -mtune=silvermont"
+                if [ "${{ env.CONFIG_SOURCE }}" = "np300e4c" ]; then
+                   echo "- **Flags del compilador:** -march=sandybridge -mtune=sandybridge"
+                else
+                   echo "- **Flags del compilador:** -march=silvermont -mtune=silvermont"
+                fi
               else
-                echo "- **Plataforma objetivo:** x86-64-v2 (genérico)"
                 echo "- **Flags del compilador:** -march=x86-64-v2 -mtune=generic"
               fi
               echo ""

@@ -1,6 +1,11 @@
-# 🐧 Linux Kernel for Acer Switch One 10 SW1-011
+# 🐧 Optimized Linux Kernels
 
-Custom Linux kernel builds optimized for Intel x5-Z8300 (Silvermont/Airmont architecture).
+Custom Linux kernel builds optimized for specific hardware targets to prioritize performance, stability, and security.
+
+## 📱 Supported Platforms
+
+- **Acer Switch One 10 (SW1-011)**: Intel Atom x5-Z8300 (Silvermont)
+- **Samsung NP300E4C-A0FCL**: Intel Core i3-2370M (Sandy Bridge)
 
 ## 📊 Build Status
 
@@ -28,8 +33,10 @@ Or manually trigger the workflow:
 
 ## ⚙️ Build Information
 
-- **Target Platform:** Intel x5-Z8300 (Silvermont)
-- **Compiler Optimizations:** `-march=silvermont -mtune=silvermont -O2`
+- **Target Platforms:**
+  - Acer SW1-011: Silvermont (`-march=silvermont`)
+  - Samsung NP300E4C: Sandy Bridge (`-march=sandybridge`)
+- **Compiler Optimizations:** `-O2 -pipe -fno-strict-aliasing`
 - **Build System:** GitHub Actions with advanced caching
 - **Linker:** Mold (ultra-fast, 3-5x faster than GNU ld)
 - **Automatic Builds:** Every 5 days (maintains warm cache)
@@ -168,21 +175,26 @@ The build system uses aggressive caching to speed up compilation:
 >Cache is automatically managed and refreshed every 5 days to prevent expiration.
 
 ### Customization
-This kernel uses a custom configuration optimized for the Acer Switch One SW1-011.
+This project supports multiple optimized configurations.
 
-#### Kernel Configuration
+#### Kernel Configuration (Acer SW1-011)
 
-The build uses `acer_sw1_011_defconfig` located in `arch/x86/configs/`. This configuration is specifically tuned for:
-
-- Intel Atom x5-Z8300 (Silvermont microarchitecture)
+The build uses `acer_sw1_011_defconfig` (stored in the kernel source). Tuned for:
+- Intel Atom x5-Z8300 (Silvermont)
 - Cherry Trail platform
-- Power efficiency optimizations
 - Touchscreen and sensor support
-- Minimal footprint
+
+#### Kernel Configuration (Samsung NP300E4C)
+
+The build uses `samsung_np300e4c_defconfig` (stored in the root of this repo). Tuned for:
+- Intel Core i3-2370M (Sandy Bridge)
+- Intel HD 3000 Graphics
+- Atheros Wireless support
+- Optimized performance and security (KSPP)
 
 To modify the kernel configuration:
 
-1. Edit `arch/x86/configs/acer_sw1_011_defconfig`
+1. Edit the respective defconfig file (`arch/x86/configs/acer_sw1_011_defconfig` in kernel-src or `samsung_np300e4c_defconfig` in this repo)
 2. Commit your changes
 3. Run the workflow
 4. The new release will use your custom configuration
@@ -208,6 +220,6 @@ Contributions are welcome! Please feel free to submit issues or pull requests.
 
 <div align="center">
 
-**Made with ❤️ for Intel x5-Z8300**
+**Made with ❤️ for Optimized Linux Performance**
 
 </div>
