@@ -432,12 +432,21 @@ jobs:
             make -s olddefconfig > /dev/null 2>&1
           fi
           
-          echo "🔍 Verificando opciones CRÍTICAS..."
-          CRITICAL_MISSING=""
-          for opt in CONFIG_INTEL_INT0002_VGPIO CONFIG_INTEL_SCU CONFIG_MMC_SDHCI_ACPI CONFIG_EXT4_FS CONFIG_PINCTRL_CHERRYVIEW; do
-            grep -qE "^$opt=[ym]" .config || CRITICAL_MISSING="$CRITICAL_MISSING $opt"
-          done
-          if [ -n "$CRITICAL_MISSING" ]; then exit 1; fi
+          if [ "${{ env.CONFIG_SOURCE }}" != "np300e4c" ]; then
+            echo "🔍 Verificando opciones CRÍTICAS (Acer)..."
+            CRITICAL_MISSING=""
+            for opt in CONFIG_INTEL_INT0002_VGPIO CONFIG_INTEL_SCU CONFIG_MMC_SDHCI_ACPI CONFIG_EXT4_FS CONFIG_PINCTRL_CHERRYVIEW; do
+              grep -qE "^$opt=[ym]" .config || CRITICAL_MISSING="$CRITICAL_MISSING $opt"
+            done
+            if [ -n "$CRITICAL_MISSING" ]; then exit 1; fi
+          else
+            echo "🔍 Verificando opciones CRÍTICAS (Samsung)..."
+            CRITICAL_MISSING=""
+            for opt in CONFIG_EXT4_FS CONFIG_SATA_AHCI; do
+              grep -qE "^$opt=[ym]" .config || CRITICAL_MISSING="$CRITICAL_MISSING $opt"
+            done
+            if [ -n "$CRITICAL_MISSING" ]; then exit 1; fi
+          fi
 
           echo ""
           echo "=== Resumen de configuración ==="
