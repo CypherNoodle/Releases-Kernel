@@ -451,7 +451,7 @@ jobs:
             if [ "${{ env.CONFIG_SOURCE }}" == ".config" ]; then
               cp .config.x86_64 .config
             elif [ "${{ env.CONFIG_SOURCE }}" == "np300e4c" ]; then
-              cp ../samsung_np300e4c_defconfig arch/x86/configs/
+              cp "$GITHUB_WORKSPACE/samsung_np300e4c_defconfig" arch/x86/configs/
               make -s samsung_np300e4c_defconfig
             else
               make -s acer_sw1_011_defconfig
@@ -463,10 +463,22 @@ jobs:
           
           echo "🔍 Verificando opciones CRÍTICAS..."
           CRITICAL_MISSING=""
-          for opt in CONFIG_INTEL_INT0002_VGPIO CONFIG_INTEL_SCU CONFIG_MMC_SDHCI_ACPI CONFIG_EXT4_FS CONFIG_PINCTRL_CHERRYVIEW; do
-            grep -qE "^$opt=[ym]" .config || CRITICAL_MISSING="$CRITICAL_MISSING $opt"
-          done
-          if [ -n "$CRITICAL_MISSING" ]; then exit 1; fi
+          if [ "${{ env.CONFIG_SOURCE }}" == "np300e4c" ]; then
+            # Opciones críticas para NP300E4C (Sandy Bridge)
+            for opt in CONFIG_ATA CONFIG_SATA_AHCI CONFIG_BLK_DEV_SD CONFIG_EXT4_FS CONFIG_DRM_I915; do
+              grep -qE "^$opt=[ym]" .config || CRITICAL_MISSING="$CRITICAL_MISSING $opt"
+            done
+          else
+            # Opciones críticas para Acer SW1-011 (Silvermont)
+            for opt in CONFIG_INTEL_INT0002_VGPIO CONFIG_INTEL_SCU CONFIG_MMC_SDHCI_ACPI CONFIG_EXT4_FS CONFIG_PINCTRL_CHERRYVIEW; do
+              grep -qE "^$opt=[ym]" .config || CRITICAL_MISSING="$CRITICAL_MISSING $opt"
+            done
+          fi
+
+          if [ -n "$CRITICAL_MISSING" ]; then
+            echo "❌ ERROR: Faltan opciones críticas:$CRITICAL_MISSING"
+            false
+          fi
 
           if ! grep -qE "CONFIG_FRAME_POINTER=y|CONFIG_FUNCTION_TRACER=y|CONFIG_STACK_TRACER=y" .config; then
             echo "KCFLAGS=${{ env.KCFLAGS }} -fomit-frame-pointer" >> $GITHUB_ENV
