@@ -476,7 +476,7 @@ jobs:
             done
           else
             # Opciones críticas para Acer SW1-011 (Silvermont)
-            for opt in CONFIG_INTEL_INT0002_VGPIO CONFIG_INTEL_SCU CONFIG_MMC_SDHCI_ACPI CONFIG_EXT4_FS CONFIG_PINCTRL_CHERRYVIEW; do
+            for opt in CONFIG_MMC CONFIG_MMC_BLOCK CONFIG_INTEL_INT0002_VGPIO CONFIG_INTEL_SCU CONFIG_MMC_SDHCI_ACPI CONFIG_EXT4_FS CONFIG_PINCTRL_CHERRYVIEW; do
               grep -qE "^$opt=[ym]" .config || CRITICAL_MISSING="$CRITICAL_MISSING $opt"
             done
           fi
