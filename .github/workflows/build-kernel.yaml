@@ -514,7 +514,6 @@ jobs:
           echo "=========================================="
           echo "CONFIGURACIÓN DE BUILD"
           echo "=========================================="
-          echo "Compilador: ${{ env.CC }}"
           echo "KCFLAGS: ${{ env.KCFLAGS }}"
           echo "Linker: ${{ env.LINKER }}"
           echo "Jobs en paralelo: ${{ env.JOBS }}"
