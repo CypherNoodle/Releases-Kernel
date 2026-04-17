@@ -188,6 +188,7 @@ jobs:
             # Optimización x86-64-v2 para Clang (genérico pero eficiente)
             KCFLAGS="-O2 -march=x86-64-v2 -mtune=generic -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128"
             echo "PLATFORM_NAME=x86-64-v2 (genérico)" >> $GITHUB_ENV
+            echo "PKG_NAME=linux-generic-v2" >> $GITHUB_ENV
 
             if [ "$LINKER" = "lld" ]; then
               echo "LDFLAGS=-fuse-ld=lld -Wl,--hash-style=gnu -Wl,--build-id=sha1" >> $GITHUB_ENV
@@ -199,11 +200,13 @@ jobs:
             if [ "$CONFIG_SOURCE" = "np300e4c" ]; then
               # Optimización específica para Sandy Bridge (Samsung NP300E4C)
               KCFLAGS="-O2 -march=sandybridge -mtune=sandybridge -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16"
-              echo "PLATFORM_NAME=Samsung NP300E4C (Sandy Bridge)" >> $GITHUB_ENV
+              echo "PLATFORM_NAME=Samsung NP300E4C (Celeron B820)" >> $GITHUB_ENV
+              echo "PKG_NAME=linux-samsung-np300e4c" >> $GITHUB_ENV
             else
               # Optimización específica para Silvermont (Acer SW1-011)
               KCFLAGS="-O2 -march=silvermont -mtune=silvermont -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16"
               echo "PLATFORM_NAME=Intel x5-Z8300 (Silvermont)" >> $GITHUB_ENV
+              echo "PKG_NAME=linux-acer-sw1-011" >> $GITHUB_ENV
             fi
 
             if [ "$LINKER" = "mold" ]; then
@@ -771,9 +774,9 @@ jobs:
 
           # ── Determinar descripción según toolchain ─────────────────────────
           if [ "${{ env.COMPILER }}" = "clang" ]; then
-            PKGDESC="Kernel Linux ${{ env.KERNEL_VERSION }} para Acer SW1-011 (Clang+LLD, x86-64-v2)"
+            PKGDESC="Kernel Linux ${{ env.KERNEL_VERSION }} para ${{ env.PLATFORM_NAME }} (Clang+LLD)"
           else
-            PKGDESC="Kernel Linux ${{ env.KERNEL_VERSION }} para Acer SW1-011 (GCC+${{ env.LINKER }}, Silvermont)"
+            PKGDESC="Kernel Linux ${{ env.KERNEL_VERSION }} para ${{ env.PLATFORM_NAME }} (GCC+${{ env.LINKER }})"
           fi
 
           # ── Escribir preset y hook en el staging ANTES de que makepkg corra ──
@@ -787,35 +790,35 @@ jobs:
           PKGVER="${KV//-/}"  # Elimina TODOS los guiones
 
           mkdir -p "$STAGING/etc/mkinitcpio.d"
-          printf 'ALL_config="/etc/mkinitcpio.conf"\n' > "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          printf 'ALL_kver="%s"\n' "$KV"    >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          printf "PRESETS=('default' 'fallback')\n"        >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          printf 'default_image="/boot/initramfs-%s.img"\n' "$KV"       >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          printf 'fallback_options="-S autodetect"\n'       >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
-          printf 'fallback_image="/boot/initramfs-%s-fallback.img"\n' "$KV" >> "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
+          printf 'ALL_config="/etc/mkinitcpio.conf"\n' > "$STAGING/etc/mkinitcpio.d/${{ env.PKG_NAME }}.preset"
+          printf 'ALL_kver="%s"\n' "$KV"    >> "$STAGING/etc/mkinitcpio.d/${{ env.PKG_NAME }}.preset"
+          printf "PRESETS=('default' 'fallback')\n"        >> "$STAGING/etc/mkinitcpio.d/${{ env.PKG_NAME }}.preset"
+          printf 'default_image="/boot/initramfs-%s.img"\n' "$KV"       >> "$STAGING/etc/mkinitcpio.d/${{ env.PKG_NAME }}.preset"
+          printf 'fallback_options="-S autodetect"\n'       >> "$STAGING/etc/mkinitcpio.d/${{ env.PKG_NAME }}.preset"
+          printf 'fallback_image="/boot/initramfs-%s-fallback.img"\n' "$KV" >> "$STAGING/etc/mkinitcpio.d/${{ env.PKG_NAME }}.preset"
 
           mkdir -p "$STAGING/usr/share/libalpm/hooks"
 
           # Hook 60: depmod (corre PRIMERO para regenerar dependencias de módulos)
           printf '[Trigger]\nOperation = Install\nOperation = Upgrade\nOperation = Remove\nType = Path\nTarget = usr/lib/modules/%s/*\n' "$KV" \
-            > "$STAGING/usr/share/libalpm/hooks/60-linux-acer-sw1-011-depmod.hook"
+            > "$STAGING/usr/share/libalpm/hooks/60-${{ env.PKG_NAME }}-depmod.hook"
           printf '\n[Action]\nDescription = Actualizando dependencias de módulos para %s...\nWhen = PostTransaction\nExec = /usr/bin/depmod %s\n' "$KV" "$KV" \
-            >> "$STAGING/usr/share/libalpm/hooks/60-linux-acer-sw1-011-depmod.hook"
+            >> "$STAGING/usr/share/libalpm/hooks/60-${{ env.PKG_NAME }}-depmod.hook"
 
           # Hook 95: mkinitcpio (corre DESPUÉS, cuando depmod ya terminó)
-          printf '[Trigger]\nOperation = Install\nOperation = Upgrade\nType = Package\nTarget = linux-acer-sw1-011\n' \
-            > "$STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
-          printf '\n[Action]\nDescription = Generando initramfs para linux-acer-sw1-011...\nWhen = PostTransaction\nExec = /usr/bin/mkinitcpio -p linux-acer-sw1-011\n' \
-            >> "$STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
+          printf '[Trigger]\nOperation = Install\nOperation = Upgrade\nType = Package\nTarget = ${{ env.PKG_NAME }}\n' \
+            > "$STAGING/usr/share/libalpm/hooks/95-${{ env.PKG_NAME }}.hook"
+          printf '\n[Action]\nDescription = Generando initramfs para ${{ env.PKG_NAME }}...\nWhen = PostTransaction\nExec = /usr/bin/mkinitcpio -p ${{ env.PKG_NAME }}\n' \
+            >> "$STAGING/usr/share/libalpm/hooks/95-${{ env.PKG_NAME }}.hook"
 
           echo "✅ Preset:"
-          cat "$STAGING/etc/mkinitcpio.d/linux-acer-sw1-011.preset"
+          cat "$STAGING/etc/mkinitcpio.d/${{ env.PKG_NAME }}.preset"
           echo ""
           echo "✅ Hook depmod (60):"
-          cat "$STAGING/usr/share/libalpm/hooks/60-linux-acer-sw1-011-depmod.hook"
+          cat "$STAGING/usr/share/libalpm/hooks/60-${{ env.PKG_NAME }}-depmod.hook"
           echo ""
           echo "✅ Hook mkinitcpio (95):"
-          cat "$STAGING/usr/share/libalpm/hooks/95-linux-acer-sw1-011.hook"
+          cat "$STAGING/usr/share/libalpm/hooks/95-${{ env.PKG_NAME }}.hook"
           echo ""
 
           # ── Generar PKGBUILD con printf ────────────────────────────────────
@@ -823,7 +826,7 @@ jobs:
             printf '# Maintainer: CypherNoodle <github.com/CypherNoodle>\n'
             printf '# Generado por GitHub Actions - Build #${{ github.run_number }}\n'
             printf '# Toolchain: ${{ env.COMPILER }} + ${{ env.LINKER }}\n\n'
-            printf 'pkgname=linux-acer-sw1-011\n'
+            printf 'pkgname=${{ env.PKG_NAME }}\n'
             printf 'pkgver=%s\n' "$PKGVER"
             printf 'pkgrel=1\n'
             printf 'pkgdesc="%s"\n' "$PKGDESC"
@@ -834,7 +837,7 @@ jobs:
             printf 'optdepends=(\n'
             printf "    'linux-firmware: firmware para hardware periférico'\n"
             printf ')\n'
-            printf 'provides=("linux=%s")\n' "$PKGVER"
+            printf 'provides=("linux=%s" "${{ env.PKG_NAME }}")\n' "$PKGVER"
             printf "options=('!strip')\n\n"
             printf 'package() {\n'
             printf '    # staging ya incluye preset y hook, solo copiar\n'
@@ -914,7 +917,7 @@ jobs:
               echo "### Arch Linux"
               echo ""
               echo "\`\`\`bash"
-              echo "sudo pacman -U linux-acer-sw1-011-*.pkg.tar.zst"
+              echo "sudo pacman -U ${{ env.PKG_NAME }}-*.pkg.tar.zst"
               echo "# El hook post-instalación regenera el initramfs automáticamente"
               echo "sudo reboot"
               echo "\`\`\`"
@@ -934,7 +937,7 @@ jobs:
             fi
             if [ "$FORMAT" = "arch" ] || [ "$FORMAT" = "ambos" ]; then
               echo "### Arch Linux"
-              echo "- \`linux-acer-sw1-011-*.pkg.tar.zst\` — Imagen + módulos"
+              echo "- \`${{ env.PKG_NAME }}-*.pkg.tar.zst\` — Imagen + módulos"
               echo ""
             fi
           }
@@ -968,9 +971,9 @@ jobs:
               echo "- **Plataforma objetivo:** ${{ env.PLATFORM_NAME }}"
               if [ "${{ env.COMPILER }}" = "gcc" ]; then
                 if [ "${{ env.CONFIG_SOURCE }}" = "np300e4c" ]; then
-                   echo "- **Flags del compilador:** -march=sandybridge -mtune=sandybridge"
+                   echo "- **Flags del compilador:** ${{ env.KCFLAGS }}"
                 else
-                   echo "- **Flags del compilador:** -march=silvermont -mtune=silvermont"
+                   echo "- **Flags del compilador:** ${{ env.KCFLAGS }}"
                 fi
               else
                 echo "- **Flags del compilador:** -march=x86-64-v2 -mtune=generic"
@@ -1016,9 +1019,9 @@ jobs:
               echo "- **Plataforma objetivo:** ${{ env.PLATFORM_NAME }}"
               if [ "${{ env.COMPILER }}" = "gcc" ]; then
                 if [ "${{ env.CONFIG_SOURCE }}" = "np300e4c" ]; then
-                   echo "- **Flags del compilador:** -march=sandybridge -mtune=sandybridge"
+                   echo "- **Flags del compilador:** ${{ env.KCFLAGS }}"
                 else
-                   echo "- **Flags del compilador:** -march=silvermont -mtune=silvermont"
+                   echo "- **Flags del compilador:** ${{ env.KCFLAGS }}"
                 fi
               else
                 echo "- **Flags del compilador:** -march=x86-64-v2 -mtune=generic"

@@ -5,7 +5,7 @@ Custom Linux kernel builds optimized for specific hardware targets to prioritize
 ## 📱 Supported Platforms
 
 - **Acer Switch One 10 (SW1-011)**: Intel Atom x5-Z8300 (Silvermont)
-- **Samsung NP300E4C-A0FCL**: Intel Core i3-2370M (Sandy Bridge)
+- **Samsung NP300E4C-A0FCL**: Intel Celeron B820 (Sandy Bridge)
 
 ## 📊 Build Status
 
@@ -35,7 +35,8 @@ Or manually trigger the workflow:
 
 - **Target Platforms:**
   - Acer SW1-011: Silvermont (`-march=silvermont`)
-  - Samsung NP300E4C: Sandy Bridge (`-march=sandybridge`)
+  - Samsung NP300E4C: Celeron B820 (`-march=sandybridge`)
+  -
 - **Compiler Optimizations:** `-O2 -pipe -fno-strict-aliasing`
 - **Build System:** GitHub Actions with advanced caching
 - **Linker:** Mold (ultra-fast, 3-5x faster than GNU ld)
@@ -187,7 +188,7 @@ The build uses `acer_sw1_011_defconfig` (stored in the kernel source). Tuned for
 #### Kernel Configuration (Samsung NP300E4C)
 
 The build uses `samsung_np300e4c_defconfig` (stored in the root of this repo). Tuned for:
-- Intel Core i3-2370M (Sandy Bridge)
+- Intel Celeron B820 (Sandy Bridge)
 - Intel HD 3000 Graphics
 - Atheros Wireless support
 - Optimized performance and security (KSPP)
