@@ -1,4 +1,4 @@
-# Optimized defconfig for Samsung NP300E4C (Sandy Bridge - Celeron B820)
+# Optimized defconfig for Samsung NP300E4C (Sandy Bridge - Celeron B820 (Intel HD 2000))
 # Target: high performance, stability, and high security.
 
 # CPU & Base System
@@ -255,3 +255,9 @@ CONFIG_ATH10K_USB=m
 CONFIG_ATH11K=m
 CONFIG_ATH11K_PCI=m
 CONFIG_BT_ATH3K=m
+
+# Graphics & Display (Intel HD 2000)
+CONFIG_DRM_I915_CAPTURE_ERROR=y
+CONFIG_DRM_I915_COMPRESS_ERROR=y
+CONFIG_DRM_I915_USERPTR=y
+CONFIG_DRM_I915_GVT=n

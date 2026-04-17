@@ -189,7 +189,7 @@ The build uses `acer_sw1_011_defconfig` (stored in the kernel source). Tuned for
 
 The build uses `samsung_np300e4c_defconfig` (stored in the root of this repo). Tuned for:
 - Intel Celeron B820 (Sandy Bridge)
-- Intel HD 3000 Graphics
+- Intel HD Graphics 2000
 - Atheros Wireless support
 - Optimized performance and security (KSPP)
 
