@@ -1,0 +1,184 @@
+name: Pull Request Test Build
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - '.gitignore'
+      - 'LICENSE'
+
+jobs:
+  build:
+    name: Build Kernel (${{ matrix.config_source }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        config_source: [sw1-011, np300e4c]
+
+    env:
+      COMPILER: gcc
+      LINKER: mold
+      PACKAGE_FORMAT: deb
+      CONFIG_SOURCE: ${{ matrix.config_source }}
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: CypherNoodle/linux-Sw1-011
+          path: kernel-src
+          fetch-depth: 32
+          filter: blob:limit=1m
+
+      - name: Checkout releases repo (this repo)
+        uses: actions/checkout@v4
+        with:
+          path: releases-repo
+          clean: false
+
+      - name: Setup tmpfs build directory
+        run: |
+          echo "🚀 Configurando tmpfs para I/O más rápido..."
+          TMPFS_SIZE="6G"
+          sudo mkdir -p /tmp/kernel-build
+          sudo mount -t tmpfs -o size=$TMPFS_SIZE tmpfs /tmp/kernel-build
+          sudo chown -R $USER:$USER /tmp/kernel-build
+
+          rsync -a --exclude='.git' kernel-src/ /tmp/kernel-build/
+          mv kernel-src/.git kernel-git-backup
+          rm -rf kernel-src
+          ln -s /tmp/kernel-build kernel-src
+
+      - name: Detect Kernel Version
+        id: detect_version
+        working-directory: kernel-src
+        run: |
+          KERNEL_VERSION=$(awk '/^VERSION = / {v=$3} /^PATCHLEVEL = / {p=$3} /^SUBLEVEL = / {s=$3} /^EXTRAVERSION = / {e=$3} END {print v "." p "." s e}' Makefile)
+          echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
+
+      - name: Determine toolchain variables
+        run: |
+          echo "JOBS=$(($(nproc) + 2))" >> $GITHUB_ENV
+          echo "CC=ccache gcc" >> $GITHUB_ENV
+          echo "CXX=ccache g++" >> $GITHUB_ENV
+
+          if [ "${{ env.CONFIG_SOURCE }}" = "np300e4c" ]; then
+            echo "KCFLAGS=-O2 -march=sandybridge -mtune=sandybridge -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16" >> $GITHUB_ENV
+            echo "PLATFORM_NAME=Samsung NP300E4C (Sandy Bridge)" >> $GITHUB_ENV
+          else
+            echo "KCFLAGS=-O2 -march=silvermont -mtune=silvermont -pipe -fno-strict-aliasing -fno-common -mprefer-vector-width=128 -falign-functions=16 -falign-loops=16" >> $GITHUB_ENV
+            echo "PLATFORM_NAME=Intel x5-Z8300 (Silvermont)" >> $GITHUB_ENV
+          fi
+          echo "LDFLAGS=-fuse-ld=mold -Wl,--hash-style=gnu -Wl,--build-id=sha1" >> $GITHUB_ENV
+          echo "KCPPFLAGS=-D_FORTIFY_SOURCE=2" >> $GITHUB_ENV
+          echo "KDOC_WERROR=0" >> $GITHUB_ENV
+          echo "KCONFIG_NOTIMESTAMP=1" >> $GITHUB_ENV
+          echo "KBUILD_BUILD_VERSION=1" >> $GITHUB_ENV
+
+      - name: Restore APT cache
+        uses: actions/cache@v4
+        id: apt-restore
+        with:
+          path: ~/apt-cache
+          key: apt-${{ runner.os }}-v4
+          restore-keys: |
+            apt-${{ runner.os }}-
+
+      - name: Install build dependencies
+        run: |
+          if [ -d ~/apt-cache ]; then
+            sudo cp -r ~/apt-cache/* /var/cache/apt/archives/ 2>/dev/null || true
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mold build-essential bc libssl-dev libelf-dev libncurses-dev flex bison ccache rsync zstd dwarves
+
+          mkdir -p ~/apt-cache
+          sudo cp /var/cache/apt/archives/*.deb ~/apt-cache/ 2>/dev/null || true
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        id: ccache-restore
+        with:
+          path: ~/.ccache
+          key: ccache-pr-${{ runner.os }}-${{ env.COMPILER }}-${{ env.CONFIG_SOURCE }}-${{ env.KERNEL_VERSION }}
+          restore-keys: |
+            ccache-pr-${{ runner.os }}-${{ env.COMPILER }}-${{ env.CONFIG_SOURCE }}-
+            ccache-${{ runner.os }}-${{ env.COMPILER }}-${{ env.CONFIG_SOURCE }}-
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size=5G
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=1
+          ccache --set-config=sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers
+          ccache --set-config=hash_dir=false
+          ccache --set-config=temporary_dir=/tmp/kernel-build/ccache-tmp
+          mkdir -p /tmp/kernel-build/ccache-tmp
+          ccache --zero-stats
+
+      - name: Prepare kernel configuration
+        working-directory: kernel-src
+        run: |
+          if [ "${{ env.CONFIG_SOURCE }}" == "np300e4c" ]; then
+            cp "$GITHUB_WORKSPACE/releases-repo/samsung_np300e4c_defconfig" arch/x86/configs/
+            make -s samsung_np300e4c_defconfig
+          else
+            make -s acer_sw1_011_defconfig
+          fi
+          scripts/config --disable CONFIG_DEBUG_INFO
+          scripts/config --set-val CONFIG_DEBUG_INFO_NONE y
+          make -s olddefconfig > /dev/null 2>&1
+
+      - name: Compile kernel
+        working-directory: kernel-src
+        run: |
+          export PATH="/usr/lib/ccache:$PATH"
+          export CCACHE_DIR="$HOME/.ccache"
+          START_TIME=$(date +%s)
+          make -j${{ env.JOBS }} KERNELRELEASE=${{ env.KERNEL_VERSION }} bzImage modules 2>&1 | tee build.log
+          END_TIME=$(date +%s)
+          echo "BUILD_TIME=$((END_TIME - START_TIME))" >> $GITHUB_ENV
+
+      - name: Package .deb
+        working-directory: kernel-src
+        run: |
+          export PATH="/usr/lib/ccache:$PATH"
+          export CCACHE_DIR="$HOME/.ccache"
+          yes "" 2>/dev/null | make -s -j${{ env.JOBS }} \
+            KERNELRELEASE=${{ env.KERNEL_VERSION }} \
+            KDEB_PKGVERSION=${{ env.KERNEL_VERSION }}-pr${{ github.event.pull_request.number }} \
+            KDEB_SOURCENAME=linux-custom \
+            KDEB_COMPRESS=zstd \
+            INSTALL_MOD_STRIP=1 \
+            bindeb-pkg 2>&1 | tee -a build.log
+
+      - name: Collect release files
+        run: |
+          mkdir -p release
+          cp /tmp/*.deb release/ 2>/dev/null || true
+          cd release
+          sha256sum *.deb > SHA256SUMS.txt || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-pr${{ github.event.pull_request.number }}-${{ matrix.config_source }}
+          path: |
+            release/*.deb
+            release/SHA256SUMS.txt
+
+      - name: Build summary
+        if: always()
+        run: |
+          echo "### Build Summary (${{ matrix.config_source }}) 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ${{ job.status == 'success' && '✅ Success' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Kernel:** ${{ env.KERNEL_VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platform:** ${{ env.PLATFORM_NAME }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "- **Artifacts:** Available in the *Actions* tab of this run." >> $GITHUB_STEP_SUMMARY
+          fi
