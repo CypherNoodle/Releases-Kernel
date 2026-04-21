@@ -390,12 +390,12 @@ jobs:
 
           echo "2️⃣  KERNEL .CONFIG:"
           if [ "${{ steps.config-restore.outputs.cache-hit }}" == "true" ]; then
-            echo "   ✅ RESTAURADO: ${{ env.CONFIG_SOURCE }}" cacheado para ${{ env.COMPILER }}"
+            echo "   ✅ RESTAURADO: ${{ env.CONFIG_SOURCE }} cacheado para ${{ env.COMPILER }}"
             if [ -f kernel-src/.config ]; then
               echo "   📅 Timestamp: $(stat -c %y kernel-src/.config 2>/dev/null || stat -f %Sm kernel-src/.config)"
             fi
           else
-            echo "   ⚠️  SE GENERARÁ: .config nuevo desde ${{ env.CONFIG_SOURCE }}" para ${{ env.COMPILER }}"
+            echo "   ⚠️  SE GENERARÁ: .config nuevo desde ${{ env.CONFIG_SOURCE }} para ${{ env.COMPILER }}"
             echo "   ⚠️  Esto INVALIDARÁ entradas del ccache (cambian los timestamps)"
           fi
           echo ""
@@ -496,7 +496,7 @@ jobs:
           echo ""
           echo "=== Resumen de configuración ==="
           echo "Config usado: ${{ env.CONFIG_SOURCE }}"
-          echo "Config cacheado: ${{ steps.config-restore.outputs.cache-hit }}"
+          echo "Config cacheado: ${{ steps.config-restore.outputs.cache-hit == 'true' && 'Sí' || 'No' }}"
           echo "Compilador: ${{ env.COMPILER }}"
           echo "Linker: ${{ env.LINKER }}"
           echo "Optimización: ${{ env.PLATFORM_NAME }}"
@@ -717,6 +717,7 @@ jobs:
             echo "=== Información del caché ==="
             echo "ccache restaurado desde: ${{ steps.ccache-restore.outputs.cache-matched-key }}"
             echo "tools restaurado desde: ${{ steps.kernel-tools-restore.outputs.cache-matched-key }}"
+            echo "config restaurado: ${{ steps.config-restore.outputs.cache-hit == 'true' && 'Sí' || 'No' }}"
             echo ""
             echo "=== Estadísticas de Ccache ==="
             ccache --show-stats 2>/dev/null || echo "stats de ccache no disponibles"
