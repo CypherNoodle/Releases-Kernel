@@ -35,8 +35,8 @@ on:
         required: false
         type: boolean
         default: false
-  schedule:
-    - cron: '0 0 */5 * *'
+  #schedule:
+   # - cron: '0 0 */5 * *'
 
 jobs:
   build:
